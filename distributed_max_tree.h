@@ -397,7 +397,7 @@ protected:
             MPI_Allreduce(MPI_IN_PLACE, &total, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);
             if (total == 0) continue;
 
-            // normalize the tuples...
+            // normalize the tuples
             if (!halo_area.empty()) {
                 for (auto& tuple : bucket) {
                     tuple.from = this->canonize(halo_area, tuple.from);
@@ -407,23 +407,25 @@ protected:
 
             // resolve the tuple chains
             bool unresolved = true;
+            AreaRules<U> area;
+            RootRules<T, U> roots;
+
             while (unresolved) {
+                area.clear(); roots.clear();
                 this->sample_sort(bucket);
-                unresolved = this->resolve_partial_chain(color, bucket, tuple_buckets);
-                // check whether we are globally done
-                MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
+                unresolved = this->resolve_partial_chain(color, bucket, tuple_buckets, area, roots);
+                MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_); // globally done?
             }
-
-            ++runs;
-            if (runs == 1) break;
-
-
-
-//            this->normalize_partial_chain(color, tuple_buckets, inverse);
-//            this->redistribute_tuples(inverse, offset);
+            this->generate_new_tuples(color, bucket, tuple_buckets, area, roots);
 
             // TODO: remove me
+            ++runs;
+            if (runs == 1) break;
         }
+
+        // send the tuples back to the owners
+        this->redistribute_tuples(tuple_buckets, offset);
+        this->stitch_halos();
     }
 
     template<typename T, typename U=Parents::type>
@@ -490,7 +492,7 @@ protected:
                 incoming_tuples.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_
         );
         this->unique_sorted(incoming_tuples);
-        
+
         // exchange the incoming tuples with the bucket
         bucket.swap(incoming_tuples);
     };
@@ -503,10 +505,8 @@ protected:
 
 
     template<typename T, typename U=Parents::type>
-    bool resolve_partial_chain(T color, Tuples<T, U>& tuples, TupleBuckets<T, U>& tuple_buckets) {
-        AreaRules<U> area;
-        RootRules<T, U> roots;
-
+    bool resolve_partial_chain(T color, Tuples<T, U>& tuples, TupleBuckets<T, U>& tuple_buckets,
+                               AreaRules<U>& area, RootRules<T, U>& roots) {
         // iterate over each tuple and find a root for it and link connected areas
         bool unresolved = false;
         for (auto tuple = tuples.begin(); tuple != tuples.end(); ++tuple) {
@@ -549,23 +549,22 @@ protected:
                 area[from_to.second] = from_to.first;
             }
         }
-
-        return unresolved;
-
         // tuple chain is locally resolved, exchange information globally
-//        Endpoints<T, U> ends;
-//        this->initialize_ends(ends, tuples, area, roots);
-//        MPI_Scan(MPI_IN_PLACE, ends.data(), ends.size(), this->endpoint_type_, this->level_connect_, this->comm_);
-//        this->stitch_ends(tuples, ends, area, roots);
-//
-//        this->initialize_ends(ends, tuples, area, roots);
-//        std::swap(ends.front(), ends.back());
-//        MPI_Scan(MPI_IN_PLACE, ends.data(), ends.size(), this->endpoint_type_, this->level_connect_, this->reverse_comm_);
-//        std::swap(ends.front(), ends.back());
-//        this->stitch_ends(tuples, ends, area, roots);
+        Endpoints<T, U> ends;
+        this->initialize_ends(ends, tuples, area, roots);
+        MPI_Scan(MPI_IN_PLACE, ends.data(), ends.size(), this->endpoint_type_, this->level_connect_, this->comm_);
+        unresolved |= this->stitch_ends(tuples, ends, area, roots);
+
+        this->initialize_ends(ends, tuples, area, roots);
+        std::swap(ends.front(), ends.back());
+        MPI_Scan(MPI_IN_PLACE, ends.data(), ends.size(), this->endpoint_type_, this->level_connect_, this->reverse_comm_);
+        std::swap(ends.front(), ends.back());
+        unresolved |= this->stitch_ends(tuples, ends, area, roots);
 
         // generate new inverse tuples from the rules and root elements
 //        this->generate_new_tuples(tuple_buckets, tuples, area, roots);
+
+        return unresolved;
     }
 
     template<typename T, typename U=Parents::type>
@@ -600,8 +599,9 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    void stitch_ends(Tuples<T, U>& tuples, Endpoints<T, U>& ends, AreaRules<U>& area, RootRules<T, U>& roots) {
-        if (tuples.empty()) return;
+    bool stitch_ends(Tuples<T, U>& tuples, Endpoints<T, U>& ends, AreaRules<U>& area, RootRules<T, U>& roots) {
+        bool unresolved = false;
+        if (tuples.empty()) return unresolved;
 
         const Tuple<T, U>& front = tuples.front();
         const Tuple<T, U>& back = tuples.back();
@@ -611,9 +611,11 @@ protected:
 
         if (front.from != left.current_from) {
             area[front.from] = left.current_from;
+            unresolved = true;
         }
         if (back.from != right.current_from) {
             area[back.from] = right.current_from;
+            unresolved = true;
         }
 
         Root<T, U>& front_root = roots[front.from];
@@ -630,6 +632,8 @@ protected:
         front_root.second = left.current_root_to;
         back_root.first = right.current_root_color;
         back_root.second = right.current_root_to;
+
+        return unresolved;
     };
 
     template<typename T, typename U=Parents::type>
@@ -660,30 +664,12 @@ protected:
         }
     };
 
-    template<typename T, typename U=Parents::type>
-    void normalize_partial_chain(T color, TupleBuckets<T, U>& buckets, TupleBuckets<T, U>& inverse) {
-        bool unresolved = true;
-        AreaRules<U> area_rules;
-        Tuples<T, U>& inverse_bucket = inverse[color];
-
-        while (unresolved) {
-            unresolved = false;
-            Tuples<T, U> inverse_sorted = this->sample_sort(inverse_bucket, area_rules);
-
-            for (auto& tuple : inverse_sorted) {
-                std::cout << tuple << std::endl;
-                if (tuple.color == tuple.neighbor_color and area_rules.find(tuple.from) == area_rules.end()) {
-                    area_rules[tuple.from] = tuple.to;
-                    unresolved = true;
-                    continue;
-                }
-                tuple.from = this->canonize(area_rules, tuple.from);
-            }
-        }
+    template <typename T, typename U=Parents::type>
+    void redistribute_tuples(TupleBuckets<T, U>& tuple_buckets, size_t offset) {
+        // TODO: implement me
     };
 
-    template <typename T, typename U=Parents::type>
-    void redistribute_tuples(TupleBuckets<T, U>& inverse, size_t offset) {
+    void stitch_halos() {
         // TODO: implement me
     };
 };
