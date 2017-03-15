@@ -416,7 +416,7 @@ protected:
                 unresolved = this->resolve_partial_chain(color, bucket, tuple_buckets, area, roots);
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_); // globally done?
             }
-            this->generate_new_tuples(color, bucket, tuple_buckets, area, roots);
+            this->generate_new_tuples(color, tuple_buckets, area, roots);
 
             // TODO: remove me
             ++runs;
@@ -561,9 +561,6 @@ protected:
         std::swap(ends.front(), ends.back());
         unresolved |= this->stitch_ends(tuples, ends, area, roots);
 
-        // generate new inverse tuples from the rules and root elements
-//        this->generate_new_tuples(tuple_buckets, tuples, area, roots);
-
         return unresolved;
     }
 
@@ -637,31 +634,48 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    void generate_new_tuples(TupleBuckets<T, U>& tuple_buckets, Tuples<T, U>& tuples,
-                             AreaRules<U>& area, RootRules<T, U>& roots, TupleBuckets<T, U>& inverse) {
-        std::set<U> seen;
+    void generate_new_tuples(T color, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, RootRules<T, U>& roots) {
+        Tuples <T, U> tuples;
+        Tuples <T, U>& bucket = tuple_buckets[color];
+        bucket.swap(tuples);
 
-        for (const auto& tuple : tuples) {
-            const auto& root = roots[tuple.from];
-            if (root.first > tuple.neighbor_color) {
-                tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, this->canonize(area, root.second),
-                                                                tuple.neighbor_color, this->canonize(area, tuple.to)));
+        std::cout << tuples << std::endl;
+        std::cout << roots << std::endl;
+        std::cout << area << std::endl;
+        std::cout << tuple_buckets << std::endl;
+
+        std::set<U> linked;
+
+        for (Tuple<T, U>& tuple : tuples) {
+            const auto root_iter = roots.find(tuple.from);
+
+            // we have an inverse tuple, put it back into the bucket it belongs after normalization
+            if (root_iter == roots.end()) {
+                Tuple<T, U> inverse(tuple.neighbor_color, tuple.to, color, this->canonize(area, tuple.from));
+                tuple_buckets[tuple.neighbor_color].push_back(inverse);
                 continue;
             }
 
+            // a tuple with a target to high up in the tree compared actual root, link the root and the target
+            const Root<T, U>& root = root_iter->second;
+            if (root.first > tuple.neighbor_color) {
+                Tuple<T, U> link_tuple(root.first, this->canonize(area, root.second),
+                                       tuple.neighbor_color, this->canonize(area, tuple.to));
+                tuple_buckets[root.first].push_back(link_tuple);
+                continue;
+            }
+
+            // tuples with the correct colored roots, canonize it and push the inverse
             U from_root = this->canonize(area, tuple.from);
             U to_root = this->canonize(area, tuple.to);
-
-            if (from_root != to_root) {
-                inverse[root.first].push_back(Tuple<T, U>(root.first, to_root, tuple.color, from_root));
-            }
-
-            if (tuple.to != to_root and seen.find(tuple.from) == seen.end()) {
-                inverse[root.first].push_back(Tuple<T, U>(root.first, tuple.to, root.first, to_root));
+            if (tuple.to != to_root and linked.find(tuple.to) == linked.end()) {
+                linked.insert(tuple.to);
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple.to, root.first, to_root));
-                seen.insert(tuple.from);
             }
+            tuple_buckets[tuple.neighbor_color].push_back(Tuple<T, U>(tuple.neighbor_color, to_root, color, from_root));
         }
+
+        std::cout << tuple_buckets << std::endl;
     };
 
     template <typename T, typename U=Parents::type>
