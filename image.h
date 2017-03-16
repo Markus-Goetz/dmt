@@ -110,6 +110,62 @@ public:
 
         return os << ss.str();
     }
+
+    /*
+     *     // Open the HDF5 file and the dataset DBSCAN in it
+    try
+    {
+        hid_t file = H5Fopen(filename.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+        hid_t dset = H5Dopen1(file, DATASET);
+        hid_t fileSpace= H5Dget_space(dset);
+
+        // Read dataset size and calculate chunk size
+        hsize_t count[2];
+        H5Sget_simple_extent_dims(fileSpace, count,NULL);
+        this->m_totalSize = count[0];
+        hsize_t chunkSize =(this->m_totalSize / this->m_mpiSize) + 1;
+        hsize_t offset[2] = {this->m_mpiRank * chunkSize, 0};
+        count[0] = std::min(chunkSize, this->m_totalSize - offset[0]);
+
+        // Initialize members
+        this->m_size         = count[0];
+        this->m_dimensions   = count[1];
+        this->m_cells        = new Cell[this->m_size];
+        this->m_points       = new Coord[this->m_size * this->m_dimensions];
+        this->m_initialOrder = new size_t[this->m_size];
+        std::iota(this->m_initialOrder, this->m_initialOrder + this->m_size, this->m_mpiRank * chunkSize);
+
+        // Read data
+        hid_t memSpace = H5Screate_simple(2, count, NULL);
+        H5Sselect_hyperslab(fileSpace,H5S_SELECT_SET,offset, NULL, count, NULL);
+        H5Dread(dset, H5T_IEEE_F32LE, memSpace, fileSpace,H5P_DEFAULT, m_points);
+
+        // Check if there is an "Cluster" dataset in the file
+        if (!this->m_mpiRank)
+        {
+            htri_t exists = H5Lexists(file, "Clusters", H5P_DEFAULT);
+            if (!exists)
+            {
+                hsize_t dims[2] = {this->m_totalSize, 1};
+                hid_t globalSpace = H5Screate_simple(1,dims,NULL);
+                hid_t clusterSet = H5Dcreate1(file, "Clusters", H5T_NATIVE_LONG ,globalSpace, H5P_DEFAULT);
+                H5Fclose(clusterSet);
+            }
+        }
+
+        // Close file and dataset
+        H5Dclose(dset);
+        H5Fclose(file);
+    }
+    catch(herr_t error)
+    {
+        if (!this->m_mpiRank)
+        {
+            std::cerr << "Could not open file " << filename << std::endl;
+        }
+        exit(this->m_mpiRank ? EXIT_SUCCESS : EXIT_FAILURE);
+     *
+     */
 };
 
 template<typename T>

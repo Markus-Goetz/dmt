@@ -112,7 +112,7 @@ public:
         AreaRules<U> area_rules;
 
         // create the reverse communicator used for the stitching scans
-        MPI_Comm_split(MPI_COMM_WORLD, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
+        MPI_Comm_split(this->comm_, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
 
         // calculate the global pixel offset
         size_t offset = image.size() - image.width();
@@ -132,12 +132,13 @@ public:
 
         // here is the meat!
         Tuples<T, U> resolved_tuples;
-
         this->get_local_tuples(image, parents, tuple_buckets, offset);
         this->connect_halos(parents, area_rules);
         this->resolve_tuples(tuple_buckets, area_rules);
         this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
         this->generate_parent_image(parents, resolved_tuples, area_rules, offset);
+
+        std::cout << parents << std::endl;
 
         // MPI clean up
         MPI_Op_free(&this->level_connect_);
@@ -173,13 +174,15 @@ protected:
 
                 if (it != rules.end() and it->second != remote) {
                     rules[local] = std::min(
-                            this->canonize<U>(rules, remote),
-                            this->canonize<U>(rules, it->second)
+                        this->canonize<U>(rules, remote),
+                        this->canonize<U>(rules, it->second)
                     );
                 } else if (local != remote) {
                     rules[local] = remote;
                 }
             }
+
+
 
             size_t offset = parents.width() * parents.height() - parents.width();
             for (int i = 0; i < *len; ++i) {
@@ -381,7 +384,7 @@ protected:
         // right directed communication of minimum
         U* read = parents.data() + (this->rank_ != 0 ? 0 : offset);
         MPI_Scan(read, recv_buffer.data(), width,
-                 MPI_Types<U>::map(), this->right_stitch_, MPI_COMM_WORLD);
+                 MPI_Types<U>::map(), this->right_stitch_, this->comm_);
 
         // left directed, backwards propagation of right minimum scan results
         for (size_t i = 0; i < width; ++i) {
@@ -763,8 +766,8 @@ protected:
             parents[i] = this->canonize(area, parents[i]);
         }
         std::vector<U> recv_buffer(width);
-        U* read = parents.data() + (this->rank_ != 0 ? 0 : offset);
-        MPI_Scan(read, recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, MPI_COMM_WORLD);
+        U* read = parents.data() + (this->rank_ != 0 ? 0 : halo_offset);
+        MPI_Scan(read, recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
 
         // canonize the flat areas
         for (auto& pixel : parents) {
@@ -774,8 +777,6 @@ protected:
         for (const auto& root : roots) {
             parents[root.first - offset] = root.second.second;
         }
-
-        std::cout << parents << std::endl;
     };
 };
 
