@@ -393,9 +393,6 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area) {
-        // TODO: remove me
-        size_t runs = 0;
-
         for (T color = Image<T>::infinity; color-- > 0;) {
             // retrieve the current bucket
             Tuples<T, U>& bucket = tuple_buckets[color];
@@ -425,10 +422,6 @@ protected:
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
             }
-
-            // TODO: remove me
-            ++runs;
-            //if (runs == 3) break;
         }
     }
 
