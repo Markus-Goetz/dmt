@@ -114,11 +114,6 @@ public:
         // create the reverse communicator used for the stitching scans
         MPI_Comm_split(MPI_COMM_WORLD, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
 
-        // calculate the global pixel offset
-        size_t offset = image.size() - image.width();
-        MPI_Exscan(MPI_IN_PLACE, &offset, 1, MPI_Types<U>::map(), MPI_SUM, this->comm_);
-        offset = this->rank_ == 0 ? 0 : offset;
-
         // allocate the parent image and buckets for the tuples
         Parents parents(Parents::infinity, image.width(), image.height());
         TupleBuckets<T, U> tuple_buckets(Image<T>::infinity);
@@ -131,9 +126,12 @@ public:
         this->create_level_connect_op<T, U>();
 
         // here is the meat!
-        this->get_local_tuples(image, parents, tuple_buckets, offset);
+        this->get_local_tuples(image, parents, tuple_buckets);
         this->connect_halos(parents, area_rules);
-        this->resolve_tuples(tuple_buckets, area_rules, offset);
+        this->resolve_tuples(tuple_buckets, area_rules);
+        Tuples<T, U> incoming = this->redistribute_tuples(image, tuple_buckets);
+        std::cout << incoming << std::endl;
+        this->generate_parent_image();
 
         // MPI clean up
         MPI_Op_free(&this->level_connect_);
@@ -297,7 +295,12 @@ protected:
     }
 
     template<typename T, typename U=Parents::type>
-    void get_local_tuples(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets, size_t offset) {
+    void get_local_tuples(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets) {
+        // calculate the global pixel offset
+        size_t offset = image.size() - image.width();
+        MPI_Exscan(MPI_IN_PLACE, &offset, 1, MPI_Types<U>::map(), MPI_SUM, this->comm_);
+        offset = this->rank_ == 0 ? 0 : offset;
+
         // bucket sort image
         Buckets<U> buckets(Image<T>::infinity);
         for (size_t i = 0; i < image.size(); ++i) {
@@ -387,7 +390,7 @@ protected:
     }
 
     template<typename T, typename U=Parents::type>
-    void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area, size_t offset) {
+    void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area) {
         // TODO: remove me
         size_t runs = 0;
 
@@ -425,10 +428,6 @@ protected:
             ++runs;
             //if (runs == 3) break;
         }
-
-        // send the tuples back to the owners
-        this->redistribute_tuples(tuple_buckets, offset);
-        this->stitch_halos();
     }
 
     template<typename T, typename U=Parents::type>
@@ -691,11 +690,65 @@ protected:
     };
 
     template <typename T, typename U=Parents::type>
-    void redistribute_tuples(TupleBuckets<T, U>& tuple_buckets, size_t offset) {
-        // TODO: implement me
+    Tuples<T, U> redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& tuple_buckets) {
+        // determine the total number of pixels in the image
+        size_t total_pixels = image.width() * image.height() - (this->rank_ + 1 == this->size_ ? 0 : image.width());
+        MPI_Allreduce(MPI_IN_PLACE, &total_pixels, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);
+
+        // chunk up the image to determine tuple target ranks
+        U total_tuples = 0;
+        U chunk = total_pixels / this->size_;
+        U remainder = total_pixels % this->size_;
+
+        // calculate which tuple goes where
+        std::vector<int> send_counts(this->size_, 0);
+        std::vector<int> recv_counts(this->size_);
+        for (const auto& bucket : tuple_buckets) {
+            for (const auto& tuple : bucket) {
+                U target_rank = tuple.from / chunk;
+                if (target_rank * chunk + std::min(target_rank, remainder) > tuple.from) {
+                    ++target_rank;
+                }
+                ++send_counts[target_rank];
+                ++total_tuples;
+            }
+        }
+        // exchange the histogram with the other ranks
+        MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, this->comm_);
+
+        // calculate the buffer displacements
+        U total_received_tuples = recv_counts[0];
+        std::vector<int> send_displs(this->size_, 0);
+        std::vector<int> recv_displs(this->size_, 0);
+        for (size_t i = 1; i < send_displs.size(); ++i) {
+            total_received_tuples += recv_counts[i];
+            send_displs[i] = send_displs[i - 1] + send_counts[i - 1];
+            recv_displs[i] = recv_displs[i - 1] + recv_counts[i - 1];
+        }
+
+        Tuples<T, U> outgoing(total_tuples);
+        Tuples<T, U> incoming(total_received_tuples);
+        std::vector<int> placement = send_displs;
+
+        for (auto& bucket : tuple_buckets) {
+            for (auto& tuple : bucket) {
+                U target_rank = tuple.from / chunk;
+                if (target_rank * chunk + std::min(target_rank, remainder) > tuple.from) {
+                    ++target_rank;
+                }
+                int& position = placement[target_rank];
+                outgoing[position] = tuple;
+                ++position;
+            }
+            bucket.clear();
+        }
+        MPI_Alltoallv(outgoing.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
+                      incoming.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
+
+        return incoming;
     };
 
-    void stitch_halos() {
+    void generate_parent_image() {
         // TODO: implement me
     };
 };
