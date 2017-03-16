@@ -114,6 +114,11 @@ public:
         // create the reverse communicator used for the stitching scans
         MPI_Comm_split(MPI_COMM_WORLD, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
 
+        // calculate the global pixel offset
+        size_t offset = image.size() - image.width();
+        MPI_Exscan(MPI_IN_PLACE, &offset, 1, MPI_Types<U>::map(), MPI_SUM, this->comm_);
+        offset = this->rank_ == 0 ? 0 : offset;
+
         // allocate the parent image and buckets for the tuples
         Parents parents(Parents::infinity, image.width(), image.height());
         TupleBuckets<T, U> tuple_buckets(Image<T>::infinity);
@@ -126,12 +131,13 @@ public:
         this->create_level_connect_op<T, U>();
 
         // here is the meat!
-        this->get_local_tuples(image, parents, tuple_buckets);
+        Tuples<T, U> resolved_tuples;
+
+        this->get_local_tuples(image, parents, tuple_buckets, offset);
         this->connect_halos(parents, area_rules);
         this->resolve_tuples(tuple_buckets, area_rules);
-        Tuples<T, U> incoming = this->redistribute_tuples(image, tuple_buckets);
-        std::cout << incoming << std::endl;
-        this->generate_parent_image();
+        this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
+        this->generate_parent_image(parents, resolved_tuples, area_rules, offset);
 
         // MPI clean up
         MPI_Op_free(&this->level_connect_);
@@ -295,11 +301,7 @@ protected:
     }
 
     template<typename T, typename U=Parents::type>
-    void get_local_tuples(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets) {
-        // calculate the global pixel offset
-        size_t offset = image.size() - image.width();
-        MPI_Exscan(MPI_IN_PLACE, &offset, 1, MPI_Types<U>::map(), MPI_SUM, this->comm_);
-        offset = this->rank_ == 0 ? 0 : offset;
+    void get_local_tuples(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets, size_t offset) {
 
         // bucket sort image
         Buckets<U> buckets(Image<T>::infinity);
@@ -690,7 +692,7 @@ protected:
     };
 
     template <typename T, typename U=Parents::type>
-    Tuples<T, U> redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& tuple_buckets) {
+    void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& tuple_buckets, Tuples<T, U>& incoming) {
         // determine the total number of pixels in the image
         size_t total_pixels = image.width() * image.height() - (this->rank_ + 1 == this->size_ ? 0 : image.width());
         MPI_Allreduce(MPI_IN_PLACE, &total_pixels, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);
@@ -727,7 +729,7 @@ protected:
         }
 
         Tuples<T, U> outgoing(total_tuples);
-        Tuples<T, U> incoming(total_received_tuples);
+        incoming.resize(total_received_tuples);
         std::vector<int> placement = send_displs;
 
         for (auto& bucket : tuple_buckets) {
@@ -744,12 +746,43 @@ protected:
         }
         MPI_Alltoallv(outgoing.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
                       incoming.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
-
-        return incoming;
     };
 
-    void generate_parent_image() {
-        // TODO: implement me
+    template <typename T, typename U=Parents::type>
+    void generate_parent_image(Parents& parents, Tuples<T, U>& resolved, AreaRules<U>& area, size_t offset) {
+        RootRules<T, U> roots;
+
+        // parse the tuples and store the results in the area/roots map
+        for (auto& tuple : resolved) {
+            if (tuple.color != tuple.neighbor_color) {
+                roots[tuple.from] = Root<T, U>(tuple.neighbor_color, tuple.to);
+            } else {
+                area[tuple.from] = tuple.to;
+            }
+        }
+
+        // normalize the halo zone and communicate it to the neighbor nodes
+        size_t width = parents.width();
+        size_t total_pixels = width * parents.height();
+        size_t halo_offset = total_pixels - width;
+
+        for (size_t i = halo_offset; i < total_pixels; ++i) {
+            parents[i] = this->canonize(area, parents[i]);
+        }
+        std::vector<U> recv_buffer(width);
+        U* read = parents.data() + (this->rank_ != 0 ? 0 : offset);
+        MPI_Scan(read, recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, MPI_COMM_WORLD);
+
+        // canonize the flat areas
+        for (auto& pixel : parents) {
+            pixel = this->canonize(area, pixel);
+        }
+        // and finally set the roots
+        for (const auto& root : roots) {
+            parents[root.first - offset] = root.second.second;
+        }
+
+        std::cout << parents << std::endl;
     };
 };
 
