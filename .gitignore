@@ -108,3 +108,6 @@ cmake-*/*
 
 # Docker
 Dockerfile
+
+# HDF5
+*.h5
