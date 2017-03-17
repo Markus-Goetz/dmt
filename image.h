@@ -3,14 +3,17 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <string>
 #include <vector>
+
+#include "hdf5_wrapper.h"
+#include "util.h"
 
 template<typename T>
 class Image {
@@ -22,6 +25,7 @@ public:
 
     size_t width_;
     size_t height_;
+    size_t offset_;
 
     typedef T type;
 
@@ -88,8 +92,12 @@ public:
     }
 
     friend std::ostream& operator<<(std::ostream& os, const Image& image) {
-        const T& maximum = *std::max_element(image.cbegin(), image.cend());
+        if (image.size() == 0) {
+            std::cout << std::endl;
+            return os;
+        }
 
+        const T& maximum = *std::max_element(image.cbegin(), image.cend());
         size_t zero_fill = static_cast<size_t>(std::ceil(std::log10(image.size())));
         size_t digit_fill = static_cast<size_t>(std::max(static_cast<double>(zero_fill), 3.0));
         std::stringstream ss;
@@ -111,61 +119,39 @@ public:
         return os << ss.str();
     }
 
-    /*
-     *     // Open the HDF5 file and the dataset DBSCAN in it
-    try
-    {
-        hid_t file = H5Fopen(filename.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-        hid_t dset = H5Dopen1(file, DATASET);
-        hid_t fileSpace= H5Dget_space(dset);
+    void read(const std::string& path, const std::string& dataset_name, MPI_Comm comm) {
+        HDF5File file(path, H5F_ACC_RDONLY);
+        HDF5Dataset dataset(file, dataset_name);
 
-        // Read dataset size and calculate chunk size
-        hsize_t count[2];
-        H5Sget_simple_extent_dims(fileSpace, count,NULL);
-        this->m_totalSize = count[0];
-        hsize_t chunkSize =(this->m_totalSize / this->m_mpiSize) + 1;
-        hsize_t offset[2] = {this->m_mpiRank * chunkSize, 0};
-        count[0] = std::min(chunkSize, this->m_totalSize - offset[0]);
-
-        // Initialize members
-        this->m_size         = count[0];
-        this->m_dimensions   = count[1];
-        this->m_cells        = new Cell[this->m_size];
-        this->m_points       = new Coord[this->m_size * this->m_dimensions];
-        this->m_initialOrder = new size_t[this->m_size];
-        std::iota(this->m_initialOrder, this->m_initialOrder + this->m_size, this->m_mpiRank * chunkSize);
-
-        // Read data
-        hid_t memSpace = H5Screate_simple(2, count, NULL);
-        H5Sselect_hyperslab(fileSpace,H5S_SELECT_SET,offset, NULL, count, NULL);
-        H5Dread(dset, H5T_IEEE_F32LE, memSpace, fileSpace,H5P_DEFAULT, m_points);
-
-        // Check if there is an "Cluster" dataset in the file
-        if (!this->m_mpiRank)
-        {
-            htri_t exists = H5Lexists(file, "Clusters", H5P_DEFAULT);
-            if (!exists)
-            {
-                hsize_t dims[2] = {this->m_totalSize, 1};
-                hid_t globalSpace = H5Screate_simple(1,dims,NULL);
-                hid_t clusterSet = H5Dcreate1(file, "Clusters", H5T_NATIVE_LONG ,globalSpace, H5P_DEFAULT);
-                H5Fclose(clusterSet);
-            }
+        if (dataset.n_dims != 2) {
+            std::stringstream message;
+            message << "Image needs to be 2D, but is " << dataset.n_dims << "D" << std::endl;
+            throw message.str();
         }
 
-        // Close file and dataset
-        H5Dclose(dset);
-        H5Fclose(file);
+        int rank, size;
+        MPI_Comm_rank(comm, &rank);
+        MPI_Comm_size(comm, &size);
+
+        hsize_t total_size = 1;
+        for (const auto& size : dataset.dims) {
+            total_size *= size;
+        }
+
+        hsize_t lines = dataset.dims[0] / size;
+        hsize_t remainder = dataset.dims[0] % size;
+        std::vector<hsize_t> counts = dataset.dims;
+        counts[0] = lines + (rank < remainder ? 1 : 0) + (rank + 1 < size ? 1 : 0);
+        std::vector<hsize_t> offsets(dataset.n_dims, 0);
+        offsets[0] = lines * rank + std::min<hsize_t>(rank, remainder);
+
+        hsize_t pixel_count = total_size / dataset.dims[0] * counts[0];
+
+        this->height_ = counts[0];
+        this->width_ = counts[1];
+        this->pixels_.resize(total_size * counts[0] / dataset.dims[0]);
+        dataset.read_chunks(this->pixels_.data(), counts.data(), offsets.data());
     }
-    catch(herr_t error)
-    {
-        if (!this->m_mpiRank)
-        {
-            std::cerr << "Could not open file " << filename << std::endl;
-        }
-        exit(this->m_mpiRank ? EXIT_SUCCESS : EXIT_FAILURE);
-     *
-     */
 };
 
 template<typename T>

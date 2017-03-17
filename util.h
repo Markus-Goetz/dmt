@@ -1,25 +1,49 @@
-#ifndef UTIL_H
-#define UTIL_H
+#ifndef DMT_UTIL_H
+#define DMT_UTIL_H
 
-#include <cstdint>
-#include <mpi.h>
+#include <iostream>
+#include <map>
+#include <sstream>
+#include <vector>
 
-template <typename T>
-struct MPI_Types;
+template<typename T>
+std::ostream& operator<<(std::ostream& os, const std::vector<T>& v) {
+    size_t i = 1;
+    std::stringstream ss;
+    size_t size = v.size();
 
-#define SPECIALIZE_MPI_TYPE(type, mpi_type) \
-    template <> \
-    struct MPI_Types<type> \
-    { \
-        static MPI_Datatype map() \
-        { \
-            return mpi_type; \
-        } \
-    };
-    
-SPECIALIZE_MPI_TYPE(uint8_t,  MPI_BYTE)
-SPECIALIZE_MPI_TYPE(uint16_t, MPI_UNSIGNED_SHORT)
-SPECIALIZE_MPI_TYPE(uint32_t, MPI_UNSIGNED)
-SPECIALIZE_MPI_TYPE(uint64_t, MPI_UNSIGNED_LONG)
+    ss << "[";
+    for (const auto& element : v) {
+        ss << element;
+        if (i < size) {
+            ss << ", ";
+        }
+        ++i;
+    }
+    ss << "]";
+    return os << ss.str();
+}
 
-#endif // UTIL_H
+template<typename T, typename U>
+std::ostream& operator<<(std::ostream& os, const std::map<T, U>& m) {
+    std::stringstream ss;
+    ss << "{";
+    if (m.size() > 0) {
+        ss << std::endl;
+    }
+    for (auto& element : m) {
+        ss << "\t" << element << "," << std::endl;
+    }
+    ss << "}";
+
+    return os << ss.str();
+}
+
+template<typename T, typename U>
+std::ostream& operator<<(std::ostream& os, const std::pair<T, U>& p) {
+    std::stringstream ss;
+    ss << (+p.first) << ": " << (+p.second);
+    return os << ss.str();
+}
+
+#endif //DMT_UTIL_H

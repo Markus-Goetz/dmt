@@ -10,7 +10,7 @@
 #include <mpi.h>
 
 #include "image.h"
-#include "util.h"
+#include "mpi_wrapper.h"
 #include "tuple.h"
 
 template<typename T, typename U=Parents::type>

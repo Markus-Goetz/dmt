@@ -17,6 +17,7 @@
 #include "endpoint.h"
 #include "image.h"
 #include "tuple.h"
+#include "mpi_wrapper.h"
 #include "util.h"
 
 template<typename T=Parents::type>
@@ -40,30 +41,6 @@ using Root = std::pair<T, U>;
 template<typename T, typename U=Parents::type>
 using RootRules = std::map<U, Root<T, U>>;
 
-template<typename T>
-std::ostream& operator<<(std::ostream& os, const std::vector<T>& v) {
-    size_t i = 1;
-    std::stringstream ss;
-
-    ss << "[";
-    for (const auto& element : v) {
-        ss << element;
-        if (i < v.size()) {
-            ss << ", ";
-        }
-        ++i;
-    }
-    ss << "]";
-    return os << ss.str();
-}
-
-template<typename T>
-std::ostream& operator<<(std::ostream& os, const std::array<T, 2>& a) {
-    std::stringstream ss;
-    ss << "[" << a[0] << ", " << a[1] << "]";
-    return os << ss.str();
-}
-
 template<typename T, typename U=Parents::type>
 std::ostream& operator<<(std::ostream& os, const TupleBuckets<T, U>& v) {
     std::stringstream ss;
@@ -77,28 +54,6 @@ std::ostream& operator<<(std::ostream& os, const TupleBuckets<T, U>& v) {
     return os << ss.str();
 }
 
-template<typename T, typename U>
-std::ostream& operator<<(std::ostream& os, const std::map<T, U>& m) {
-    std::stringstream ss;
-    ss << "{";
-    if (m.size() > 0) {
-        ss << std::endl;
-    }
-    for (auto& element : m) {
-        ss << "\t" << element << "," << std::endl;
-    }
-    ss << "}";
-
-    return os << ss.str();
-}
-
-template<typename T, typename U>
-std::ostream& operator<<(std::ostream& os, const std::pair<T, U>& p) {
-    std::stringstream ss;
-    ss << (+p.first) << ": " << p.second;
-    return os << ss.str();
-}
-
 class DistributedMaxTree {
 public:
     DistributedMaxTree(MPI_Comm comm = MPI_COMM_WORLD)
@@ -108,7 +63,7 @@ public:
     }
 
     template<typename T, typename U=Parents::type>
-    void compute(const Image<T>& image) {
+    Parents compute(const Image<T>& image) {
         AreaRules<U> area_rules;
 
         // create the reverse communicator used for the stitching scans
@@ -138,8 +93,6 @@ public:
         this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
         this->generate_parent_image(parents, resolved_tuples, area_rules, offset);
 
-        std::cout << parents << std::endl;
-
         // MPI clean up
         MPI_Op_free(&this->level_connect_);
         MPI_Op_free(&this->left_stitch_);
@@ -147,6 +100,8 @@ public:
         MPI_Type_free(&this->endpoint_type_);
         MPI_Type_free(&this->tuple_type_);
         MPI_Comm_free(&this->reverse_comm_);
+
+        return parents;
     }
 
 protected:
@@ -426,6 +381,7 @@ protected:
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
             }
         }
+
     }
 
     template<typename T, typename U=Parents::type>
@@ -765,6 +721,8 @@ protected:
         for (size_t i = halo_offset; i < total_pixels; ++i) {
             parents[i] = this->canonize(area, parents[i]);
         }
+
+        // exchange globally
         std::vector<U> recv_buffer(width);
         U* read = parents.data() + (this->rank_ != 0 ? 0 : halo_offset);
         MPI_Scan(read, recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
@@ -773,6 +731,7 @@ protected:
         for (auto& pixel : parents) {
             pixel = this->canonize(area, pixel);
         }
+
         // and finally set the roots
         for (const auto& root : roots) {
             parents[root.first - offset] = root.second.second;
