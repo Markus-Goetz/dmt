@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <hdf5.h>
+#include <mpi.h>
 
 template<typename T>
 struct HDF5Types;
@@ -74,12 +75,11 @@ struct HDF5File {
     }
 };
 
-HDF5Dataset::HDF5Dataset(const HDF5File& file, const std::string& name_) : file_id(file.id), name(name_), id(-1),
-                                                                           data_space(-1), n_dims(0) {
+HDF5Dataset::HDF5Dataset(const HDF5File& file, const std::string& name_)
+    : file_id(file.id), name(name_), id(-1), data_space(-1), n_dims(0) {
     if (!H5Lexists(this->file_id, this->name.c_str(), H5P_DEFAULT)) {
         return;
     }
-
     this->id = H5Dopen(this->file_id, this->name.c_str(), H5P_DEFAULT);
     if (this->id < 0) {
         std::stringstream message;

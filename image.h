@@ -157,28 +157,42 @@ public:
     }
 
     void write(const std::string& path, const std::string& dataset_name, MPI_Comm comm, std::vector<hsize_t>& dims) {
-        HDF5File* file;
-        int rank, size;
+        int rank, size, message;
         MPI_Comm_rank(comm, &rank);
         MPI_Comm_size(comm, &size);
 
-        if (rank == 0) {
-            file = new HDF5File(path, std::ifstream(path) ? H5F_ACC_RDWR : H5F_ACC_EXCL);
-            MPI_Barrier(comm);
-        } else {
-            MPI_Barrier(comm);
-            file = new HDF5File(path, H5F_ACC_RDWR);
-        }
-        HDF5Dataset dataset(*file, dataset_name);
-
         hsize_t lines = dims[0] / size;
         hsize_t remainder = dims[0] % size;
-
         hsize_t counts[] = {(rank + 1 == size ? this->height_ : this->height_ - 1), this->width_};
         hsize_t offsets[] = {lines * rank + std::min<hsize_t>(rank, remainder), 0};
 
-        dataset.write_chunks(this->pixels_.data(), static_cast<int>(dims.size()), dims.data(), counts, offsets);
-        delete file;
+        HDF5File* file;
+        HDF5Dataset* dataset;
+
+        if (rank == 0) {
+            unsigned flags = H5F_ACC_RDWR;
+            if (!std::ifstream(path)) {
+                flags = H5F_ACC_EXCL;
+            }
+            file = new HDF5File(path, flags);
+            dataset = new HDF5Dataset(*file, dataset_name);
+            dataset->write_chunks(this->pixels_.data(), static_cast<int>(dims.size()), dims.data(), counts, offsets);
+            delete dataset;
+            delete file;
+            if (size > 1) {
+                MPI_Send(&rank, 1, MPI_INT, 1, 0, comm);
+            }
+        } else {
+            MPI_Recv(&message, 1, MPI_INT, rank - 1, 0, comm, MPI_STATUS_IGNORE);
+            file = new HDF5File(path, H5F_ACC_RDWR);
+            dataset = new HDF5Dataset(*file, dataset_name);
+            dataset->write_chunks(this->pixels_.data(), static_cast<int>(dims.size()), dims.data(), counts, offsets);
+            delete dataset;
+            delete file;
+            if (rank + 1 < size) {
+                MPI_Send(&rank, 1, MPI_INT, rank + 1, 0, comm);
+            }
+        }
     }
 };
 
