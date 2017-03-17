@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <fstream>
 #include <initializer_list>
 #include <iomanip>
 #include <iostream>
@@ -119,7 +120,7 @@ public:
         return os << ss.str();
     }
 
-    void read(const std::string& path, const std::string& dataset_name, MPI_Comm comm) {
+    std::vector<hsize_t> read(const std::string& path, const std::string& dataset_name, MPI_Comm comm) {
         HDF5File file(path, H5F_ACC_RDONLY);
         HDF5Dataset dataset(file, dataset_name);
 
@@ -151,6 +152,33 @@ public:
         this->width_ = counts[1];
         this->pixels_.resize(total_size * counts[0] / dataset.dims[0]);
         dataset.read_chunks(this->pixels_.data(), counts.data(), offsets.data());
+
+        return dataset.dims;
+    }
+
+    void write(const std::string& path, const std::string& dataset_name, MPI_Comm comm, std::vector<hsize_t>& dims) {
+        HDF5File* file;
+        int rank, size;
+        MPI_Comm_rank(comm, &rank);
+        MPI_Comm_size(comm, &size);
+
+        if (rank == 0) {
+            file = new HDF5File(path, std::ifstream(path) ? H5F_ACC_RDWR : H5F_ACC_EXCL);
+            MPI_Barrier(comm);
+        } else {
+            MPI_Barrier(comm);
+            file = new HDF5File(path, H5F_ACC_RDWR);
+        }
+        HDF5Dataset dataset(*file, dataset_name);
+
+        hsize_t lines = dims[0] / size;
+        hsize_t remainder = dims[0] % size;
+
+        hsize_t counts[] = {(rank + 1 == size ? this->height_ : this->height_ - 1), this->width_};
+        hsize_t offsets[] = {lines * rank + std::min<hsize_t>(rank, remainder), 0};
+
+        dataset.write_chunks(this->pixels_.data(), static_cast<int>(dims.size()), dims.data(), counts, offsets);
+        delete file;
     }
 };
 

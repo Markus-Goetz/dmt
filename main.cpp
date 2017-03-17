@@ -14,17 +14,30 @@ int main(int argc, char** argv)
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     Image<uint8_t> image;
+    std::vector<hsize_t> total_dimensions;
     try {
-        image.read("../examples.h5", "small", MPI_COMM_WORLD);
+        total_dimensions = image.read("../examples.h5", "small", MPI_COMM_WORLD);
     } catch (const std::string& message) {
-        if (rank == 0)
+        if (rank == 0) {
             std::cerr << message << std::endl;
-        exit(1);
+            exit(1);
+        } else {
+            exit(0);
+        }
     }
 
     DistributedMaxTree dmt;
     Parents parents = dmt.compute(image);
-    std::cout << parents << std::endl;
+    try {
+        parents.write("../parents.h5", "small_parents", MPI_COMM_WORLD, total_dimensions);
+    } catch (const std::string& message) {
+        if (rank == 0) {
+            std::cerr << message << std::endl;
+            exit(1);
+        } else {
+            exit(0);
+        }
+    }
     
     return MPI_Finalize();
 }
