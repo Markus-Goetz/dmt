@@ -166,29 +166,25 @@ public:
         hsize_t counts[] = {(rank + 1 == size ? this->height_ : this->height_ - 1), this->width_};
         hsize_t offsets[] = {lines * rank + std::min<hsize_t>(rank, remainder), 0};
 
-        HDF5File* file;
-        HDF5Dataset* dataset;
+        // TODO: use mpiio
 
         if (rank == 0) {
-            unsigned flags = H5F_ACC_RDWR;
-            if (!std::ifstream(path)) {
-                flags = H5F_ACC_EXCL;
+            unsigned flags = !std::ifstream(path) ? H5F_ACC_EXCL : H5F_ACC_RDWR;
+            {
+                HDF5File file(path, flags);
+                HDF5Dataset dataset(file, dataset_name);
+                dataset.write_chunks(this->pixels_.data(), static_cast<int>(dims.size()), dims.data(), counts, offsets);
             }
-            file = new HDF5File(path, flags);
-            dataset = new HDF5Dataset(*file, dataset_name);
-            dataset->write_chunks(this->pixels_.data(), static_cast<int>(dims.size()), dims.data(), counts, offsets);
-            delete dataset;
-            delete file;
             if (size > 1) {
                 MPI_Send(&rank, 1, MPI_INT, 1, 0, comm);
             }
         } else {
             MPI_Recv(&message, 1, MPI_INT, rank - 1, 0, comm, MPI_STATUS_IGNORE);
-            file = new HDF5File(path, H5F_ACC_RDWR);
-            dataset = new HDF5Dataset(*file, dataset_name);
-            dataset->write_chunks(this->pixels_.data(), static_cast<int>(dims.size()), dims.data(), counts, offsets);
-            delete dataset;
-            delete file;
+            {
+                HDF5File file(path, H5F_ACC_RDWR);
+                HDF5Dataset dataset(file, dataset_name);
+                dataset.write_chunks(this->pixels_.data(), static_cast<int>(dims.size()), dims.data(), counts, offsets);
+            }
             if (rank + 1 < size) {
                 MPI_Send(&rank, 1, MPI_INT, rank + 1, 0, comm);
             }
@@ -202,4 +198,3 @@ const T Image<T>::infinity = std::numeric_limits<T>::max();
 typedef Image<uint64_t> Parents;
 
 #endif // IMAGE_H
-
