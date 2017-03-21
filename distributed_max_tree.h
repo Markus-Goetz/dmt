@@ -646,13 +646,13 @@ protected:
     template <typename T, typename U=Parents::type>
     void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& tuple_buckets, Tuples<T, U>& incoming) {
         // determine the total number of pixels in the image
-        size_t total_pixels = image.width() * image.height() - (this->rank_ + 1 == this->size_ ? 0 : image.width());
-        MPI_Allreduce(MPI_IN_PLACE, &total_pixels, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);
+        size_t total_height = image.height() - (this->rank_ + 1 != this->size_ ? 1 : 0);
+        MPI_Allreduce(MPI_IN_PLACE, &total_height, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);
 
         // chunk up the image to determine tuple target ranks
         U total_tuples = 0;
-        U chunk = total_pixels / this->size_;
-        U remainder = total_pixels % this->size_;
+        U chunk = total_height / this->size_ * image.width();
+        U remainder = total_height % this->size_ * image.width();
 
         // calculate which tuple goes where
         std::vector<int> send_counts(this->size_, 0);
@@ -660,8 +660,8 @@ protected:
         for (const auto& bucket : tuple_buckets) {
             for (const auto& tuple : bucket) {
                 U target_rank = tuple.from / chunk;
-                if (target_rank * chunk + std::min(target_rank, remainder) > tuple.from) {
-                    ++target_rank;
+                if (target_rank * chunk + target_rank * remainder > tuple.from) {
+                    --target_rank;
                 }
                 ++send_counts[target_rank];
                 ++total_tuples;
@@ -687,8 +687,8 @@ protected:
         for (auto& bucket : tuple_buckets) {
             for (auto& tuple : bucket) {
                 U target_rank = tuple.from / chunk;
-                if (target_rank * chunk + std::min(target_rank, remainder) > tuple.from) {
-                    ++target_rank;
+                if (target_rank * chunk + target_rank * remainder > tuple.from) {
+                    --target_rank;
                 }
                 int& position = placement[target_rank];
                 outgoing[position] = tuple;
@@ -696,6 +696,7 @@ protected:
             }
             bucket.clear();
         }
+
         MPI_Alltoallv(outgoing.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
                       incoming.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
     };

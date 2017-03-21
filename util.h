@@ -42,7 +42,7 @@ std::ostream& operator<<(std::ostream& os, const std::map<T, U>& m) {
 template<typename T, typename U>
 std::ostream& operator<<(std::ostream& os, const std::pair<T, U>& p) {
     std::stringstream ss;
-    ss << (+p.first) << ": " << (+p.second);
+    ss << (+p.first) << ": " << (p.second);
     return os << ss.str();
 }
 
