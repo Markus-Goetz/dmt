@@ -11,7 +11,7 @@ struct MPI_Types;
 #define SPECIALIZE_MPI_TYPE(type, mpi_type) \
     template <> \
     struct MPI_Types<type> { \
-        static MPI_Datatype map() {\
+        static constexpr MPI_Datatype map() {\
             return mpi_type; \
         } \
     }

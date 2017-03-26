@@ -11,6 +11,7 @@
 #include <tuple>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 
 #include <mpi.h>
 
@@ -33,13 +34,13 @@ template<typename T, typename U=Parents::type>
 using Neighbors = std::vector<Neighbor<T, U>>;
 
 template<typename T=Parents::type>
-using AreaRules = std::map<T, T>;
+using AreaRules = std::unordered_map<T, T>;
 
 template<typename T, typename U=Parents::type>
 using Root = std::pair<T, U>;
 
 template<typename T, typename U=Parents::type>
-using RootRules = std::map<U, Root<T, U>>;
+using RootRules = std::unordered_map<U, Root<T, U>>;
 
 template<typename T, typename U=Parents::type>
 std::ostream& operator<<(std::ostream& os, const TupleBuckets<T, U>& v) {
@@ -76,7 +77,7 @@ public:
 
         // allocate the parent image and buckets for the tuples
         Parents parents(Parents::infinity, image.width(), image.height());
-        TupleBuckets<T, U> tuple_buckets(Image<T>::infinity);
+        TupleBuckets<T, U> tuple_buckets(Image<T>::infinity + 1);
 
         // MPI type and op creation
         Tuple<T, U>::create_mpi_type(&this->tuple_type_);
@@ -136,8 +137,6 @@ protected:
                     rules[local] = remote;
                 }
             }
-
-
 
             size_t offset = parents.width() * parents.height() - parents.width();
             for (int i = 0; i < *len; ++i) {
@@ -260,15 +259,13 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void get_local_tuples(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets, size_t offset) {
-
         // bucket sort image
-        Buckets<U> buckets(Image<T>::infinity);
+        Buckets<U> buckets(Image<T>::infinity + 1);
         for (size_t i = 0; i < image.size(); ++i) {
             T color = image[i];
             buckets[color].push_back(i);
         }
-
-        std::map<U, std::set<U> > outbound;
+        std::map<U, std::set<U>> outbound;
         T color = static_cast<T>(buckets.size() - 1);
 
         // connected component labeling
@@ -351,10 +348,11 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area) {
-        for (T color = Image<T>::infinity; color-- > 0;) {
+        for (size_t i = Image<T>::infinity + 1; i-- > 0;) {
+            T color = static_cast<T>(i);
             // retrieve the current bucket
             Tuples<T, U>& bucket = tuple_buckets[color];
-
+    
             // check whether there are tuples in this channel at all, if none are available, skip the channel
             size_t total = bucket.size();
             MPI_Allreduce(MPI_IN_PLACE, &total, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);
@@ -381,19 +379,61 @@ protected:
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
             }
         }
-
     }
+
+    template <typename T, typename U=Parents::type>
+    void balance_tuples(Tuples<T, U>& bucket) {
+        size_t local_elements = bucket.size();
+        size_t total_elements = local_elements;
+        size_t left_elements = local_elements;
+
+        MPI_Allreduce(MPI_IN_PLACE, &total_elements, 1, MPI_Types<size_t>::map(), MPI_SUM, this->comm_);
+        MPI_Exscan(MPI_IN_PLACE, &left_elements, 1, MPI_Types<size_t>::map(), MPI_SUM, this->comm_);
+        left_elements = this->rank_ != 0 ? left_elements : 0;
+
+        size_t chunk = total_elements / this->size_;
+        size_t remainder = total_elements % this->size_;
+
+        int target_rank = static_cast<int>(left_elements / chunk);
+        if (target_rank * chunk + std::min(static_cast<size_t>(target_rank), remainder) > left_elements) {
+            --target_rank;
+        }
+
+        std::vector<int> send_counts(this->size_, 0);
+        std::vector<int> recv_counts(this->size_, 0);
+        while (local_elements > 0) {
+            size_t end = (target_rank + 1) * chunk + std::min(static_cast<size_t>(target_rank + 1), remainder);
+            send_counts[target_rank] = static_cast<int>(std::min(end - left_elements, local_elements));
+            local_elements -= send_counts[target_rank];
+            left_elements = end;
+            ++target_rank;
+        }
+        MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, this->comm_);
+
+        std::vector<int> send_displs(this->size_, 0);
+        std::vector<int> recv_displs(this->size_, 0);
+        for (int rank = 1; rank < this->size_; ++rank) {
+            send_displs[rank] = send_displs[rank - 1] + send_counts[rank - 1];
+            recv_displs[rank] = recv_displs[rank - 1] + recv_counts[rank - 1];
+        }
+
+        Tuples<T, U> incoming(chunk + (this->rank_ < remainder ? 1 : 0));
+        MPI_Alltoallv(bucket.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
+                      incoming.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
+        bucket.swap(incoming);
+    };
 
     template<typename T, typename U=Parents::type>
     void sample_sort(Tuples<T, U>& bucket) {
+        this->balance_tuples(bucket);
         // allocate space for the splitters and prepare a no-op dummy
         const size_t split_count = this->size_ - 1;
+        size_t local_elements = bucket.size();
         Tuple<T, U> max_dummy;
         Tuples<T, U> splitters(this->size_ * split_count);
 
         // ... and sample sort it globally
         this->unique_sorted(bucket);
-        size_t local_elements = bucket.size();
         size_t valid_splits = std::min(split_count, local_elements);
         double local_skip = static_cast<double>(local_elements) / static_cast<double>(this->size_);
 
@@ -451,8 +491,7 @@ protected:
 
         // exchange the incoming tuples with the bucket
         bucket.swap(incoming_tuples);
-
-        // TODO: balance the distribution
+        this->balance_tuples(bucket);
     };
 
     template <typename T, typename U=Parents::type>
@@ -622,18 +661,22 @@ protected:
                 continue;
             }
 
-            // a tuple with a target to high up in the tree compared actual root, link the root and the target
+            // a tuple with a target to high up in the tree compared  actual root, link the root and the target
             const Root<T, U>& root = root_iter->second;
+            U to_root = this->canonize(area, tuple->to);
+
             if (root.first > tuple->neighbor_color) {
-                Tuple<T, U> link_tuple(root.first, this->canonize(area, root.second),
-                                       tuple->neighbor_color, this->canonize(area, tuple->to));
+                Tuple<T, U> link_tuple(root.first, this->canonize(area,  root.second), tuple->neighbor_color, to_root);
                 tuple_buckets[root.first].push_back(link_tuple);
+                if (tuple->to != to_root and linked.find(tuple->to) == linked.end()) {
+                    linked.insert(tuple->to);
+                    tuple_buckets[tuple->neighbor_color].push_back(Tuple<T, U>(tuple->neighbor_color, tuple->to, tuple->neighbor_color, to_root));
+                }
                 continue;
             }
 
-            // tuples with the correct colored roots, canonize it and push the inverse
-            U to_root = this->canonize(area, tuple->to);
-            if (tuple->to != to_root and linked.find(tuple->to) == linked.end()) {
+            // tuples with the correct colored roots, canonize it and  push the inverse
+            if (tuple->to != to_root and linked.find(tuple->to) ==  linked.end()) {
                 linked.insert(tuple->to);
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
             }
