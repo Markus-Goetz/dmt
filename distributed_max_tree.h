@@ -432,8 +432,10 @@ protected:
         Tuple<T, U> max_dummy;
         Tuples<T, U> splitters(this->size_ * split_count);
 
+        // ... sort locally
+        std::stable_sort(bucket.begin(), bucket.end());
+
         // ... and sample sort it globally
-        this->unique_sorted(bucket);
         size_t valid_splits = std::min(split_count, local_elements);
         double local_skip = static_cast<double>(local_elements) / static_cast<double>(this->size_);
 
@@ -447,7 +449,7 @@ protected:
                       splitters.data(), split_count, this->tuple_type_, this->comm_);
 
         // sort the split points
-        std::sort(splitters.begin(), splitters.end());
+        std::stable_sort(splitters.begin(), splitters.end());
 
         // determine tuple destinations by linearly scanning the tuples and dividing them based on the splits
         size_t target_rank = 0;
@@ -487,19 +489,17 @@ protected:
                 bucket.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
                 incoming_tuples.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_
         );
-        this->unique_sorted(incoming_tuples);
+
+        // merge incoming already sorted sequences
+        for (int i = 1; i < this->size_ - 1; ++i) {
+            std::inplace_merge(incoming_tuples.begin(), incoming_tuples.begin() + recv_displs[i], incoming_tuples.begin() + recv_displs[i + 1]);
+        }
+        incoming_tuples.erase(std::unique(incoming_tuples.begin(), incoming_tuples.end()), incoming_tuples.end());
 
         // exchange the incoming tuples with the bucket
         bucket.swap(incoming_tuples);
         this->balance_tuples(bucket);
     };
-
-    template <typename T, typename U=Parents::type>
-    inline void unique_sorted(Tuples<T, U>& tuples) {
-        std::sort(tuples.begin(), tuples.end());
-        tuples.erase(std::unique(tuples.begin(), tuples.end()), tuples.end());
-    };
-
 
     template<typename T, typename U=Parents::type>
     void resolve_partial_chain(T color, Tuples<T, U>& tuples, TupleBuckets<T, U>& tuple_buckets,
