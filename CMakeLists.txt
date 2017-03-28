@@ -4,8 +4,8 @@ project(dmt)
 find_package(MPI REQUIRED)
 find_package(HDF5 REQUIRED)
 
-#set(CMAKE_CXX_COMPILER "scalasca")
-#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -instrument ${MPI_CXX_COMPILER}")
+    #set(CMAKE_CXX_COMPILER "scalasca")
+    #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -instrument ${MPI_CXX_COMPILER}")
 
 set(CMAKE_CXX_COMPILER ${MPI_CXX_COMPILER})
 set(CMAKE_BUILD_TYPE RELEASE)

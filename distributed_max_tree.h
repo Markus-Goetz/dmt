@@ -348,7 +348,7 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area) {
-        for (size_t i = Image<T>::infinity + 1; i-- > 0;) {
+        for (long i = Image<T>::infinity; i >= 0; --i) {
             T color = static_cast<T>(i);
             // retrieve the current bucket
             Tuples<T, U>& bucket = tuple_buckets[color];
