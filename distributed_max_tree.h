@@ -380,7 +380,7 @@ protected:
             bool unresolved = true;
             while (unresolved) {
                 area.clear(); roots.clear();
-                this->sample_sort(bucket);
+                this->sample_sort(color, bucket);
                 this->resolve_partial_chain(bucket, area, roots);
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
                 // globally done?
@@ -433,7 +433,7 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    void sample_sort(Tuples<T, U>& bucket) {
+    void sample_sort(T color, Tuples<T, U>& bucket) {
         // early out for a single core
         if (this->size_ == 1) {
             std::sort(bucket.begin(), bucket.end());
@@ -509,8 +509,10 @@ protected:
         );
 
         // merge incoming already sorted sequences
-        for (int i = 1; i < this->size_ - 1; ++i) {
-            std::inplace_merge(incoming_tuples.begin(), incoming_tuples.begin() + recv_displs[i], incoming_tuples.begin() + recv_displs[i + 1]);
+        for (int i = 0; i < this->size_ - 1; ++i) {
+            auto middle = incoming_tuples.begin() + recv_displs[i + 1];
+            auto last = incoming_tuples.begin() + (i + 2 >= this->size_ ? static_cast<int>(incoming_tuples.size()) : recv_displs[i + 2]);
+            std::inplace_merge(incoming_tuples.begin(), middle, last);
         }
         incoming_tuples.erase(std::unique(incoming_tuples.begin(), incoming_tuples.end()), incoming_tuples.end());
 
