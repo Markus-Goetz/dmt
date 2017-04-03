@@ -98,7 +98,6 @@ public:
             return os;
         }
 
-        const T& maximum = *std::max_element(image.cbegin(), image.cend());
         size_t zero_fill = static_cast<size_t>(std::ceil(std::log10(image.size())));
         size_t digit_fill = static_cast<size_t>(std::max(static_cast<double>(zero_fill), 3.0));
         std::stringstream ss;
@@ -134,23 +133,17 @@ public:
         MPI_Comm_rank(comm, &rank);
         MPI_Comm_size(comm, &size);
 
-        hsize_t total_size = 1;
-        for (const auto& size : dataset.dims) {
-            total_size *= size;
-        }
-
+        int total_lines = static_cast<int>(dataset.dims[0]);
         hsize_t lines = dataset.dims[0] / size;
         hsize_t remainder = dataset.dims[0] % size;
         std::vector<hsize_t> counts = dataset.dims;
-        counts[0] = lines + (rank < remainder ? 1 : 0) + (rank + 1 < size ? 1 : 0);
+        counts[0] = lines + (static_cast<hsize_t>(rank) < remainder ? 1 : 0) + (rank + 1 < std::min(size, total_lines) ? 1 : 0);
         std::vector<hsize_t> offsets(dataset.n_dims, 0);
         offsets[0] = lines * rank + std::min<hsize_t>(rank, remainder);
 
-        hsize_t pixel_count = total_size / dataset.dims[0] * counts[0];
-
         this->height_ = counts[0];
         this->width_ = counts[1];
-        this->pixels_.resize(total_size * counts[0] / dataset.dims[0]);
+        this->pixels_.resize(counts[0] * counts[1]);
         dataset.read_chunks(this->pixels_.data(), counts.data(), offsets.data());
 
         return dataset.dims;

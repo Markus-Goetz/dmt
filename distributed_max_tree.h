@@ -89,15 +89,12 @@ public:
         // here is the meat!
         Tuples<T, U> resolved_tuples;
         this->get_local_tuples(image, parents, tuple_buckets, offset);
-        std::cout << 1 << std::endl;
         this->connect_halos(parents, area_rules);
-        std::cout << 2 << std::endl;
         this->resolve_tuples(tuple_buckets, area_rules);
-        std::cout << 3 << std::endl;
         this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
-        std::cout << 4 << std::endl;
         this->generate_parent_image(parents, resolved_tuples, area_rules, offset);
-        std::cout << 5 << std::endl;
+
+        std::cout << parents << std::endl;
 
         // MPI clean up
         MPI_Op_free(&this->level_connect_);
@@ -124,7 +121,7 @@ protected:
 
     template<typename U=Parents::type>
     void create_right_stitch_op(const Parents& parents, AreaRules<U>& rules) {
-        auto right_rule_scan = [this, &parents, &rules](void* in_, void* out_, int* len, MPI_Datatype* type) {
+        auto right_rule_scan = [this, &parents, &rules](void* in_, void* out_, int* len, MPI_Datatype*) {
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
 
@@ -157,7 +154,7 @@ protected:
 
     template<typename U=Parents::type>
     void create_left_stitch_op(const Parents& parents, AreaRules<U>& rules) {
-        auto left_rule_scan = [this, &parents, &rules](void* in_, void* out_, int* len, MPI_Datatype* type) {
+        auto left_rule_scan = [this, &parents, &rules](void* in_, void* out_, int* len, MPI_Datatype*) {
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
             size_t offset = parents.width() * parents.height() - parents.width();
@@ -184,7 +181,7 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void create_level_connect_op() {
-        auto connect = [](void* in_, void* out_, int* len, MPI_Datatype* type) {
+        auto connect = [](void* in_, void* out_, int*, MPI_Datatype*) {
             Endpoint<T, U>* in = reinterpret_cast<Endpoint<T, U>*>(in_);
             Endpoint<T, U>* out = reinterpret_cast<Endpoint<T, U>*>(out_);
 
@@ -275,7 +272,6 @@ protected:
         T color = static_cast<T>(buckets.size() - 1);
         // connected component labeling
         for (auto bucket = buckets.crbegin(); bucket != buckets.crend(); ++bucket) {
-
             // weakly connect the sorted pixels to flat zones per gray-value
             for (auto index = bucket->crbegin(); index != bucket->crend(); ++index) {
                 parents[*index] = *index + offset;
@@ -319,7 +315,6 @@ protected:
 
             // advance to the next color channel
             --color;
-
         }
     }
 
@@ -337,6 +332,8 @@ protected:
 
     template<typename U=Parents::type>
     void connect_halos(Parents& parents, AreaRules<U>& rules) {
+        if (this->size_ == 1) return;
+
         size_t width = parents.width();
         std::vector<U> send_buffer(width);
         std::vector<U> recv_buffer(width);
@@ -384,7 +381,7 @@ protected:
             while (unresolved) {
                 area.clear(); roots.clear();
                 this->sample_sort(bucket);
-                this->resolve_partial_chain(color, bucket, tuple_buckets, area, roots);
+                this->resolve_partial_chain(bucket, area, roots);
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
@@ -406,7 +403,7 @@ protected:
         size_t chunk = total_elements / this->size_;
         size_t remainder = total_elements % this->size_;
 
-        int target_rank = static_cast<int>(left_elements / chunk);
+        int target_rank = (chunk == 0) ? static_cast<int>(left_elements) : static_cast<int>(left_elements / chunk);
         if (target_rank * chunk + std::min(static_cast<size_t>(target_rank), remainder) > left_elements) {
             --target_rank;
         }
@@ -429,7 +426,7 @@ protected:
             recv_displs[rank] = recv_displs[rank - 1] + recv_counts[rank - 1];
         }
 
-        Tuples<T, U> incoming(chunk + (this->rank_ < remainder ? 1 : 0));
+        Tuples<T, U> incoming(chunk + (static_cast<size_t>(this->rank_) < remainder ? 1 : 0));
         MPI_Alltoallv(bucket.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
                       incoming.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
         bucket.swap(incoming);
@@ -437,7 +434,16 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void sample_sort(Tuples<T, U>& bucket) {
+        // early out for a single core
+        if (this->size_ == 1) {
+            std::sort(bucket.begin(), bucket.end());
+            bucket.erase(std::unique(bucket.begin(), bucket.end()), bucket.end());
+            return;
+        }
+
+        // balance work load
         this->balance_tuples(bucket);
+
         // allocate space for the splitters and prepare a no-op dummy
         const size_t split_count = this->size_ - 1;
         size_t local_elements = bucket.size();
@@ -475,7 +481,7 @@ protected:
         std::vector<int> recv_displs(this->size_, 0);
 
         for (const Tuple<T, U>& tuple : bucket) {
-            while (tuple >= current_split) {
+            while (tuple > current_split) {
                 ++target_rank;
                 if (target_rank == split_count) {
                     current_split = max_dummy;
@@ -514,8 +520,7 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    void resolve_partial_chain(T color, Tuples<T, U>& tuples, TupleBuckets<T, U>& tuple_buckets,
-                               AreaRules<U>& area, RootRules<T, U>& roots) {
+    void resolve_partial_chain(Tuples<T, U>& tuples, AreaRules<U>& area, RootRules<T, U>& roots) {
         // iterate over each tuple and find a root for it and link connected areas
         for (auto& tuple : tuples) {
             const U from = tuple.from;
@@ -556,6 +561,7 @@ protected:
             }
         }
 
+        if (this->size_ == 1) return;
         // tuple chain is locally resolved, exchange information globally
         Endpoints<T, U> ends;
         this->initialize_ends(ends, tuples, area, roots);
@@ -737,9 +743,7 @@ protected:
             }
 
             // tuple_buckets[tuple->neighbor_color].push_back(Tuple<T, U>(tuple->neighbor_color, to_root, color, tuple->from));
-            tuple_buckets[color].push_back(
-                    Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));  // Added by GC
-
+            tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));  // Added by GC
         }
 
         return unresolved;
@@ -747,6 +751,13 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& tuple_buckets, Tuples<T, U>& incoming) {
+        if (this->size_ == 1) {
+            for (const auto& bucket : tuple_buckets) {
+                incoming.insert(incoming.end(), bucket.begin(), bucket.end());
+            }
+            return;
+        }
+
         // determine the total number of pixels in the image
         size_t total_height = image.height() - (this->rank_ + 1 != this->size_ ? 1 : 0);
         MPI_Allreduce(MPI_IN_PLACE, &total_height, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);

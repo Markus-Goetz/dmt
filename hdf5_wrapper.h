@@ -34,7 +34,7 @@ struct HDF5Dataset {
     std::vector<hsize_t> dims;
     std::string name;
 
-    HDF5Dataset(const HDF5File& file, const std::string& name);
+    HDF5Dataset(const HDF5File& file, const std::string& name_);
 
     template<typename T>
     void read_chunks(T* target, hsize_t* counts, hsize_t* offsets);
@@ -76,7 +76,7 @@ struct HDF5File {
 };
 
 HDF5Dataset::HDF5Dataset(const HDF5File& file, const std::string& name_)
-    : file_id(file.id), name(name_), id(-1), data_space(-1), n_dims(0) {
+    : id(-1), file_id(file.id), data_space(-1), n_dims(0), name(name_) {
     if (!H5Lexists(this->file_id, this->name.c_str(), H5P_DEFAULT)) {
         return;
     }

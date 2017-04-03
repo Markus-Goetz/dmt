@@ -19,7 +19,7 @@ struct Endpoint {
     U from = std::numeric_limits<U>::max();
     T start_root_color = std::numeric_limits<T>::max();
     U start_root_to = std::numeric_limits<U>::max();
-    T current_from = std::numeric_limits<T>::max();
+    U current_from = std::numeric_limits<U>::max();
     T current_root_color = std::numeric_limits<T>::max();
     U current_root_to = std::numeric_limits<U>::max();
 
@@ -67,7 +67,7 @@ struct Endpoint {
                 MPI_Types<U>::map(),
                 MPI_Types<T>::map(),
                 MPI_Types<U>::map(),
-                MPI_Types<T>::map(),
+                MPI_Types<U>::map(),
                 MPI_Types<T>::map(),
                 MPI_Types<U>::map()
         };
