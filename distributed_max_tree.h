@@ -529,14 +529,6 @@ protected:
             const T color = tuple.color;
             const T neighbor_color = tuple.neighbor_color;
             const U area_root = this->canonize(area, from);
-//
-//            if (color == 6 and this->rank_ == 1) {
-//                std::cout << tuple << std::endl;
-//                std::cout << area << std::endl;
-//                std::cout << roots << std::endl;
-//            }
-
-
 
             // neighbor color is larger, skip over it while marking roots, check whether it is not normalized though
             if (color < neighbor_color) {
@@ -551,6 +543,7 @@ protected:
                 } else {
                     area[to] = area_root;
                 }
+                continue;
             }
 
             // is there already a root for this tuple, if not just create one
@@ -562,7 +555,7 @@ protected:
 
             // there is already a root, select either the closer one or join the two areas
             Root<T, U>& root_tuple = tuple_root_it->second;
-            if (root_tuple.first < neighbor_color and neighbor_color < color) {
+            if (root_tuple.first < neighbor_color) {
                 roots[area_root] = Root<T, U>(neighbor_color, to);
                 continue;
             }
