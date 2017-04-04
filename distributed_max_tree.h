@@ -94,8 +94,6 @@ public:
         this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
         this->generate_parent_image(parents, resolved_tuples, area_rules, offset);
 
-        std::cout << parents << std::endl;
-
         // MPI clean up
         MPI_Op_free(&this->level_connect_);
         MPI_Op_free(&this->left_stitch_);
@@ -380,13 +378,13 @@ protected:
             bool unresolved = true;
             while (unresolved) {
                 area.clear(); roots.clear();
-                this->sample_sort(color, bucket);
+                this->sample_sort(bucket);
                 this->resolve_partial_chain(bucket, area, roots);
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
             }
-            this->remap_tuples_last(color, tuple_buckets, area, roots);
+            this->final_remap(color, tuple_buckets, area, roots);
         }
     }
 
@@ -433,7 +431,7 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    void sample_sort(T color, Tuples<T, U>& bucket) {
+    void sample_sort(Tuples<T, U>& bucket) {
         // early out for a single core
         if (this->size_ == 1) {
             std::sort(bucket.begin(), bucket.end());
@@ -538,7 +536,12 @@ protected:
 
             // is this a tuple that joins two area of current color, remap them
             if (color == neighbor_color) {
-                area[from] = this->canonize(area, to);
+                auto found = area.find(from);
+                if (found == area.end()) {
+                    area[from] = to;
+                } else {
+                    area[to] = this->canonize(area, from);
+                }
             }
 
             // is there already a root for this tuple, if not just create one
@@ -643,47 +646,6 @@ protected:
         back_root.second = right.current_root_to;
     };
 
-
-    template<typename T, typename U=Parents::type>
-    void remap_tuples_last(T color, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, RootRules<T, U>& roots) {
-        std::unordered_set<U> keep;
-        std::unordered_set<U> linked;
-
-        Tuples<T, U> bucket;
-        Tuples<T, U>& tuples = tuple_buckets[color];
-        bucket.swap(tuples);
-
-        for (auto tuple = bucket.rbegin(); tuple != bucket.rend(); ++tuple) {
-            U area_root = this->canonize(area, tuple->from);
-
-            // we have an inverse tuple, put it back into its actual bucket
-            const auto root_iter = roots.find(tuple->from);
-            if (root_iter == roots.end()) {
-                Tuple<T, U> inverse(tuple->neighbor_color, tuple->to, color, area_root);
-                tuple_buckets[tuple->neighbor_color].push_back(inverse);
-                continue;
-            }
-
-            const Root<T, U>& root = root_iter->second;
-            U to_root = this->canonize(area, tuple->to);
-
-            // tuples with the correct colored roots, canonize it and  push the inverse
-            if (tuple->to != to_root and linked.find(tuple->to) == linked.end()) {
-                linked.insert(tuple->to);
-                tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
-            }
-
-            if (tuple->neighbor_color != color) {
-                tuple_buckets[tuple->neighbor_color].push_back(
-                        Tuple<T, U>(tuple->neighbor_color, to_root, color, tuple->from));
-            } else {
-                tuple_buckets[tuple->neighbor_color].push_back(
-                        Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
-            }
-        }
-    }
-
-
     template<typename T, typename U=Parents::type>
     bool remap_tuples(T color, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, RootRules<T, U>& roots) {
         bool unresolved = false;
@@ -699,7 +661,11 @@ protected:
 
             // link tuple, normalize the pointed to target
             if (tuple->color == tuple->neighbor_color) {
-                tuple->to = this->canonize(area, tuple->to);
+                U canonical_point = this->canonize(area, tuple->to);
+                if (tuple->to != canonical_point) {
+                    tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, canonical_point));
+                }
+                tuple->to = canonical_point;
                 tuple_buckets[color].push_back(*tuple);
                 continue;
             }
@@ -750,6 +716,45 @@ protected:
 
         return unresolved;
     };
+
+    template<typename T, typename U=Parents::type>
+    void final_remap(T color, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, RootRules<T, U>& roots) {
+        std::unordered_set<U> keep;
+        std::unordered_set<U> linked;
+
+        Tuples<T, U> bucket;
+        Tuples<T, U>& tuples = tuple_buckets[color];
+        bucket.swap(tuples);
+
+        for (auto tuple = bucket.rbegin(); tuple != bucket.rend(); ++tuple) {
+            U area_root = this->canonize(area, tuple->from);
+
+            // we have an inverse tuple, put it back into its actual bucket
+            const auto root_iter = roots.find(tuple->from);
+            if (root_iter == roots.end()) {
+                Tuple<T, U> inverse(tuple->neighbor_color, tuple->to, color, area_root);
+                tuple_buckets[tuple->neighbor_color].push_back(inverse);
+                continue;
+            }
+
+            const Root<T, U>& root = root_iter->second;
+            U to_root = this->canonize(area, tuple->to);
+
+            // tuples with the correct colored roots, canonize it and push the inverse
+            if (tuple->to != to_root and linked.find(tuple->to) == linked.end()) {
+                linked.insert(tuple->to);
+                tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
+            }
+
+            if (tuple->neighbor_color != color) {
+                tuple_buckets[tuple->neighbor_color].push_back(
+                        Tuple<T, U>(tuple->neighbor_color, to_root, color, tuple->from));
+            } else {
+                tuple_buckets[tuple->neighbor_color].push_back(
+                        Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
+            }
+        }
+    }
 
     template<typename T, typename U=Parents::type>
     void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& tuple_buckets, Tuples<T, U>& incoming) {
