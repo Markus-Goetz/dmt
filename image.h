@@ -133,11 +133,17 @@ public:
         MPI_Comm_rank(comm, &rank);
         MPI_Comm_size(comm, &size);
 
-        int total_lines = static_cast<int>(dataset.dims[0]);
+        hsize_t total_lines = dataset.dims[0];
+        if (total_lines < static_cast<hsize_t>(size)) {
+            std::stringstream message;
+            message << "Number of lines in image needs to be greater than processing cores - lines: " << total_lines << " cores: " << size << std::endl;
+            throw message.str();
+        }
         hsize_t lines = dataset.dims[0] / size;
         hsize_t remainder = dataset.dims[0] % size;
         std::vector<hsize_t> counts = dataset.dims;
-        counts[0] = lines + (static_cast<hsize_t>(rank) < remainder ? 1 : 0) + (rank + 1 < std::min(size, total_lines) ? 1 : 0);
+        counts[0] = lines + (static_cast<hsize_t>(rank) < remainder ? 1 : 0) +
+                    (static_cast<hsize_t>(rank + 1) < std::min(static_cast<hsize_t>(size), total_lines) ? 1 : 0);
         std::vector<hsize_t> offsets(dataset.n_dims, 0);
         offsets[0] = lines * rank + std::min<hsize_t>(rank, remainder);
 
