@@ -118,29 +118,30 @@ protected:
     int size_;
 
     template<typename U=Parents::type>
-    void create_right_stitch_op(const Parents& parents, AreaRules<U>& rules) {
-        auto right_rule_scan = [this, &parents, &rules](void* in_, void* out_, int* len, MPI_Datatype*) {
+    void create_right_stitch_op(const Parents& parents, AreaRules<U>& area) {
+        auto right_rule_scan = [this, &parents, &area](void* in_, void* out_, int* len, MPI_Datatype*) {
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
 
             for (int i = 0; i < *len; ++i) {
-                U remote = in[i];
-                U local = parents[i];
-                auto it = rules.find(local);
+                auto min_max = std::minmax(in[i], parents[i]);
+                U remote = min_max.first;
+                U local = min_max.second;
+                auto it = area.find(local);
 
-                if (it != rules.end() and it->second != remote) {
-                    rules[local] = std::min(
-                            this->canonize<U>(rules, remote),
-                            this->canonize<U>(rules, it->second)
+                if (it != area.end() and it->second != remote) {
+                    area[local] = std::min(
+                            this->canonize(area, remote),
+                            this->canonize(area, it->second)
                     );
                 } else if (local != remote) {
-                    rules[local] = remote;
+                    area[local] = remote;
                 }
             }
 
             size_t offset = parents.width() * parents.height() - parents.width();
             for (int i = 0; i < *len; ++i) {
-                out[i] = this->canonize<U>(rules, parents[offset + i]);
+                out[i] = this->canonize(area, parents[offset + i]);
             }
         };
         static auto static_right_scan = right_rule_scan;
@@ -151,8 +152,8 @@ protected:
     }
 
     template<typename U=Parents::type>
-    void create_left_stitch_op(const Parents& parents, AreaRules<U>& rules) {
-        auto left_rule_scan = [this, &parents, &rules](void* in_, void* out_, int* len, MPI_Datatype*) {
+    void create_left_stitch_op(const Parents& parents, AreaRules<U>& area) {
+        auto left_rule_scan = [this, &parents, &area](void* in_, void* out_, int* len, MPI_Datatype*) {
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
             size_t offset = parents.width() * parents.height() - parents.width();
@@ -162,12 +163,12 @@ protected:
                 U local = parents[offset + i];
 
                 if (local != remote) {
-                    rules[local] = remote;
+                    area[local] = remote;
                 }
             }
 
             for (int i = 0; i < *len; ++i) {
-                out[i] = this->canonize<U>(rules, parents[i]);
+                out[i] = this->canonize(area, parents[i]);
             }
         };
         static auto static_left_scan = left_rule_scan;
@@ -824,28 +825,29 @@ protected:
     template<typename T, typename U=Parents::type>
     void generate_parent_image(Parents& parents, Tuples<T, U>& resolved, AreaRules<U>& area, size_t offset) {
         RootRules<T, U> roots;
-        int local_nodes = 0, global_nodes = 0; // Added by GC
+        U nodes = 0;
 
         // parse the tuples and store the results in the area/roots map
         for (auto& tuple : resolved) {
             if (tuple.color != tuple.neighbor_color) {
                 roots[tuple.from] = Root<T, U>(tuple.neighbor_color, tuple.to);
-                local_nodes++; // Added by GC
+                ++nodes;
             } else {
                 area[tuple.from] = tuple.to;
             }
         }
 
-        // Compute the number of nodes  // Added by GC
-        MPI_Reduce(&local_nodes, &global_nodes, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-        if (this->rank_ == 0)
-            std::cout << "Number of nodes: " << global_nodes + 1 << std::endl;
+        // compute the number of nodes
+        MPI_Reduce(this->rank_ == 0 ? MPI_IN_PLACE : &nodes, &nodes, 1, MPI_Types<U>::map(), MPI_SUM, 0, this->comm_);
+        if (this->rank_ == 0) {
+            ++nodes;
+            std::cout << "Number of nodes: " << nodes << std::endl;
+        }
 
         // normalize the halo zone and communicate it to the neighbor nodes
         size_t width = parents.width();
         size_t total_pixels = width * parents.height();
         size_t halo_offset = total_pixels - width;
-
         for (size_t i = halo_offset; i < total_pixels; ++i) {
             parents[i] = this->canonize(area, parents[i]);
         }
