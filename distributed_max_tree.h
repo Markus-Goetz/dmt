@@ -380,7 +380,7 @@ protected:
             while (unresolved) {
                 area.clear(); roots.clear();
                 this->sample_sort(bucket);
-                this->resolve_partial_chain(color, bucket, area, roots);
+                this->resolve_partial_chain(bucket, area, roots);
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
@@ -521,7 +521,7 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    void resolve_partial_chain(T color, Tuples<T, U>& tuples, AreaRules<U>& area, RootRules<T, U>& roots) {
+    void resolve_partial_chain(Tuples<T, U>& tuples, AreaRules<U>& area, RootRules<T, U>& roots) {
         // iterate over each tuple and find a root for it and link connected areas
         for (auto& tuple : tuples) {
             const U from = tuple.from;
@@ -543,7 +543,6 @@ protected:
                 } else {
                     area[to] = area_root;
                 }
-                continue;
             }
 
             // is there already a root for this tuple, if not just create one
@@ -555,7 +554,7 @@ protected:
 
             // there is already a root, select either the closer one or join the two areas
             Root<T, U>& root_tuple = tuple_root_it->second;
-            if (root_tuple.first < neighbor_color) {
+            if (root_tuple.first < neighbor_color and neighbor_color < color) {
                 roots[area_root] = Root<T, U>(neighbor_color, to);
                 continue;
             }
