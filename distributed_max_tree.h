@@ -353,7 +353,7 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area) {
-        for (size_t i = Image<T>::infinity; i != std::numeric_limits<size_t>::max(); --i) { // Added by GC
+        for (size_t i = Image<T>::infinity; i != std::numeric_limits<size_t>::max(); --i) {
             // retrieve the current bucket
             T color = static_cast<T>(i);
             Tuples<T, U>& bucket = tuple_buckets[color];
@@ -380,7 +380,7 @@ protected:
             while (unresolved) {
                 area.clear(); roots.clear();
                 this->sample_sort(bucket);
-                this->resolve_partial_chain(bucket, area, roots);
+                this->resolve_partial_chain(color, bucket, area, roots);
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
@@ -444,7 +444,7 @@ protected:
         this->balance_tuples(bucket);
 
         // allocate space for the splitters and prepare a no-op dummy
-        const size_t split_count = this->size_ - 1;
+        const size_t split_count = static_cast<size_t>(this->size_ - 1);
         size_t local_elements = bucket.size();
         Tuple<T, U> max_dummy;
         Tuples<T, U> splitters(this->size_ * split_count);
@@ -462,8 +462,8 @@ protected:
             splitters[split] = bucket[static_cast<size_t>(std::round((split + 1) * local_skip))];
         }
         MPI_Allreduce(MPI_IN_PLACE, &valid_splits, 1, MPI_Types<U>::map(), MPI_SUM, this->comm_);
-        MPI_Allgather(MPI_IN_PLACE, split_count, this->tuple_type_,
-                      splitters.data(), split_count, this->tuple_type_, this->comm_);
+        MPI_Allgather(MPI_IN_PLACE, static_cast<int>(split_count), this->tuple_type_,
+                      splitters.data(), static_cast<int>(split_count), this->tuple_type_, this->comm_);
 
         // sort the split points
         std::stable_sort(splitters.begin(), splitters.end());
@@ -521,7 +521,7 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    void resolve_partial_chain(Tuples<T, U>& tuples, AreaRules<U>& area, RootRules<T, U>& roots) {
+    void resolve_partial_chain(T color, Tuples<T, U>& tuples, AreaRules<U>& area, RootRules<T, U>& roots) {
         // iterate over each tuple and find a root for it and link connected areas
         for (auto& tuple : tuples) {
             const U from = tuple.from;
@@ -529,6 +529,14 @@ protected:
             const T color = tuple.color;
             const T neighbor_color = tuple.neighbor_color;
             const U area_root = this->canonize(area, from);
+//
+//            if (color == 6 and this->rank_ == 1) {
+//                std::cout << tuple << std::endl;
+//                std::cout << area << std::endl;
+//                std::cout << roots << std::endl;
+//            }
+
+
 
             // neighbor color is larger, skip over it while marking roots, check whether it is not normalized though
             if (color < neighbor_color) {
@@ -541,7 +549,7 @@ protected:
                 if (found == area.end()) {
                     area[from] = to;
                 } else {
-                    area[to] = this->canonize(area, from);
+                    area[to] = area_root;
                 }
             }
 
@@ -554,7 +562,7 @@ protected:
 
             // there is already a root, select either the closer one or join the two areas
             Root<T, U>& root_tuple = tuple_root_it->second;
-            if (root_tuple.first < neighbor_color) {
+            if (root_tuple.first < neighbor_color and neighbor_color < color) {
                 roots[area_root] = Root<T, U>(neighbor_color, to);
                 continue;
             }
