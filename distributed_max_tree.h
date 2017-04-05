@@ -87,9 +87,9 @@ public:
 
         // here is the meat!
         Tuples<T, U> resolved_tuples;
-        this->get_local_tuples(image, parents, tuple_buckets, offset);
+        T max_color = this->get_local_tuples(image, parents, tuple_buckets, offset);
         this->connect_halos(parents, area);
-        this->resolve_tuples(tuple_buckets, area);
+        this->resolve_tuples(tuple_buckets, area, max_color);
         this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
         this->generate_parent_image(parents, resolved_tuples, area, offset);
 
@@ -258,12 +258,14 @@ protected:
     }
 
     template<typename T, typename U=Parents::type>
-    void get_local_tuples(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets, size_t offset) {
+    T get_local_tuples(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets, size_t offset) {
         // bucket sort image
+        T max_color = 0;
         Buckets<U> buckets(Image<T>::infinity + 1); // Added by GC
         for (size_t i = 0; i < image.size(); ++i) {
             T color = image[i];
             buckets[color].push_back(i);
+            max_color = std::max(color, max_color);
         }
 
         std::map<U, std::set<U> > outbound;
@@ -314,6 +316,8 @@ protected:
             // advance to the next color channel
             --color;
         }
+
+        return max_color;
     }
 
     template<typename U=Parents::type>
@@ -351,8 +355,8 @@ protected:
     }
 
     template<typename T, typename U=Parents::type>
-    void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area) {
-        for (size_t i = Image<T>::infinity; i != std::numeric_limits<size_t>::max(); --i) {
+    void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area, T max_color) {
+        for (size_t i = max_color; i != std::numeric_limits<size_t>::max(); --i) {
             // retrieve the current bucket
             T color = static_cast<T>(i);
             Tuples<T, U>& bucket = tuple_buckets[color];
@@ -767,20 +771,21 @@ protected:
 
         // determine the total number of pixels in the image
         size_t total_height = image.height() - (this->rank_ + 1 != this->size_ ? 1 : 0);
-        MPI_Allreduce(MPI_IN_PLACE, &total_height, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);
+        MPI_Allreduce(MPI_IN_PLACE, &total_height, 1, MPI_Types<decltype(total_height)>::map(), MPI_SUM, this->comm_);
 
         // chunk up the image to determine tuple target ranks
+        size_t width = image.width();
         U total_tuples = 0;
-        U chunk = total_height / this->size_ * image.width();
-        U remainder = total_height % this->size_ * image.width();
+        U chunk = total_height / this->size_ * width;
+        U remainder = total_height % this->size_;
 
         // calculate which tuple goes where
-        std::vector<int> send_counts(this->size_, 0);
-        std::vector<int> recv_counts(this->size_);
+        std::vector<int> send_counts(static_cast<size_t>(this->size_), 0);
+        std::vector<int> recv_counts(static_cast<size_t>(this->size_), 0);
         for (const auto& bucket : tuple_buckets) {
             for (const auto& tuple : bucket) {
                 U target_rank = tuple.from / chunk;
-                if (target_rank * chunk + target_rank * remainder > tuple.from) {
+                while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
                     --target_rank;
                 }
                 ++send_counts[target_rank];
@@ -790,7 +795,7 @@ protected:
         // exchange the histogram with the other ranks
         MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, this->comm_);
 
-        // calculate the buffer displacements
+        //  calculate the buffer displacements
         U total_received_tuples = recv_counts[0];
         std::vector<int> send_displs(this->size_, 0);
         std::vector<int> recv_displs(this->size_, 0);
@@ -807,7 +812,7 @@ protected:
         for (auto& bucket : tuple_buckets) {
             for (auto& tuple : bucket) {
                 U target_rank = tuple.from / chunk;
-                if (target_rank * chunk + target_rank * remainder > tuple.from) {
+                while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
                     --target_rank;
                 }
                 int& position = placement[target_rank];
@@ -825,6 +830,7 @@ protected:
     void generate_parent_image(Parents& parents, Tuples<T, U>& resolved, AreaRules<U>& area, size_t offset) {
         RootRules<T, U> roots;
         U nodes = 0;
+        area.clear();
 
         // parse the tuples and store the results in the area/roots map
         for (auto& tuple : resolved) {
