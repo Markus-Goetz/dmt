@@ -316,6 +316,7 @@ protected:
             // advance to the next color channel
             --color;
         }
+        MPI_Allreduce(MPI_IN_PLACE, &max_color, 1, MPI_Types<T>::map(), MPI_MAX, this->comm_);
 
         return max_color;
     }
