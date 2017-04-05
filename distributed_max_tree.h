@@ -64,7 +64,7 @@ public:
 
     template<typename T, typename U=Parents::type>
     Parents compute(const Image<T>& image) {
-        AreaRules<U> area_rules;
+        AreaRules<U> area;
 
         // create the reverse communicator used for the stitching scans
         MPI_Comm_split(this->comm_, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
@@ -76,23 +76,22 @@ public:
 
         // allocate the parent image and buckets for the tuples
         Parents parents(Parents::infinity, image.width(), image.height());
-        // TupleBuckets<T, U> tuple_buckets(Image<T>::infinity);
-        TupleBuckets<T, U> tuple_buckets(Image<T>::infinity + 1); // GC
+        TupleBuckets<T, U> tuple_buckets(static_cast<size_t>(Image<T>::infinity) + 1);
 
         // MPI type and op creation
         Tuple<T, U>::create_mpi_type(&this->tuple_type_);
         Endpoint<T, U>::create_mpi_type(&this->endpoint_type_);
-        this->create_right_stitch_op<U>(parents, area_rules);
-        this->create_left_stitch_op<U>(parents, area_rules);
+        this->create_right_stitch_op<U>(parents, area);
+        this->create_left_stitch_op<U>(parents, area);
         this->create_level_connect_op<T, U>();
 
         // here is the meat!
         Tuples<T, U> resolved_tuples;
         this->get_local_tuples(image, parents, tuple_buckets, offset);
-        this->connect_halos(parents, area_rules);
-        this->resolve_tuples(tuple_buckets, area_rules);
+        this->connect_halos(parents, area);
+        this->resolve_tuples(tuple_buckets, area);
         this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
-        this->generate_parent_image(parents, resolved_tuples, area_rules, offset);
+        this->generate_parent_image(parents, resolved_tuples, area, offset);
 
         // MPI clean up
         MPI_Op_free(&this->level_connect_);
@@ -360,7 +359,7 @@ protected:
 
             // check whether there are tuples in this channel at all, if none are available, skip the channel
             size_t total = bucket.size();
-            MPI_Allreduce(MPI_IN_PLACE, &total, 1, MPI_UNSIGNED_LONG, MPI_SUM, this->comm_);
+            MPI_Allreduce(MPI_IN_PLACE, &total, 1, MPI_Types<decltype(total)>::map(), MPI_SUM, this->comm_);
             if (total == 0) {
                 continue;
             }
@@ -395,15 +394,15 @@ protected:
         size_t total_elements = local_elements;
         size_t left_elements = local_elements;
 
-        MPI_Allreduce(MPI_IN_PLACE, &total_elements, 1, MPI_Types<size_t>::map(), MPI_SUM, this->comm_);
-        MPI_Exscan(MPI_IN_PLACE, &left_elements, 1, MPI_Types<size_t>::map(), MPI_SUM, this->comm_);
+        MPI_Allreduce(MPI_IN_PLACE, &total_elements, 1, MPI_Types<decltype(total_elements)>::map(), MPI_SUM, this->comm_);
+        MPI_Exscan(MPI_IN_PLACE, &left_elements, 1, MPI_Types<decltype(left_elements)>::map(), MPI_SUM, this->comm_);
         left_elements = this->rank_ != 0 ? left_elements : 0;
 
         size_t chunk = total_elements / this->size_;
         size_t remainder = total_elements % this->size_;
 
         int target_rank = (chunk == 0) ? static_cast<int>(left_elements) : static_cast<int>(left_elements / chunk);
-        if (target_rank * chunk + std::min(static_cast<size_t>(target_rank), remainder) > left_elements) {
+        while (target_rank * chunk + std::min(static_cast<size_t>(target_rank), remainder) > left_elements) {
             --target_rank;
         }
 
@@ -747,12 +746,12 @@ protected:
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
             }
 
+            Tuples<T, U>& target_bucket = tuple_buckets[tuple->neighbor_color];
             if (tuple->neighbor_color != color) {
-                tuple_buckets[tuple->neighbor_color].push_back(
-                        Tuple<T, U>(tuple->neighbor_color, to_root, color, tuple->from));
+                target_bucket.push_back(Tuple<T, U>(tuple->neighbor_color, to_root, color, tuple->from));
             } else {
-                tuple_buckets[tuple->neighbor_color].push_back(
-                        Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
+                tuple->to = to_root;
+                target_bucket.push_back(*tuple);
             }
         }
     }
