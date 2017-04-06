@@ -158,8 +158,9 @@ protected:
             size_t offset = parents.width() * parents.height() - parents.width();
 
             for (int i = 0; i < *len; ++i) {
-                U remote = in[i];
-                U local = parents[offset + i];
+                auto min_max = std::minmax(in[i], parents[offset + i]);
+                U remote = min_max.first;
+                U local = min_max.second;
 
                 if (local != remote) {
                     area[local] = remote;
@@ -715,8 +716,7 @@ protected:
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
             }
 
-            // tuple_buckets[tuple->neighbor_color].push_back(Tuple<T, U>(tuple->neighbor_color, to_root, color, tuple->from));
-            tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));  // Added by GC
+            tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
         }
 
         return unresolved;
@@ -787,6 +787,7 @@ protected:
             for (const auto& tuple : bucket) {
                 U target_rank = tuple.from / chunk;
                 while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
+                    if (target_rank == 0) break;
                     --target_rank;
                 }
                 ++send_counts[target_rank];
@@ -814,6 +815,7 @@ protected:
             for (auto& tuple : bucket) {
                 U target_rank = tuple.from / chunk;
                 while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
+                    if (target_rank == 0) break;
                     --target_rank;
                 }
                 int& position = placement[target_rank];
@@ -854,15 +856,19 @@ protected:
         size_t width = parents.width();
         size_t total_pixels = width * parents.height();
         size_t halo_offset = total_pixels - width;
+        std::vector<U> buffer(width);
+
+        for (size_t i = 0; i < width; ++i) {
+            parents[i] = this->canonize(area, parents[i]);
+        }
+        MPI_Scan(parents.data(), buffer.data(), width, MPI_Types<U>::map(), this->left_stitch_, this->reverse_comm_);
+
         for (size_t i = halo_offset; i < total_pixels; ++i) {
             parents[i] = this->canonize(area, parents[i]);
         }
+        MPI_Scan(parents.data() + halo_offset, buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
 
-        // exchange globally
-        std::vector<U> recv_buffer(width);
-        U* read = parents.data() + (this->rank_ != 0 ? 0 : halo_offset);
-        MPI_Scan(read, recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
-
+        // 110, 131182
         // canonize the flat areas
         for (auto& pixel : parents) {
             pixel = this->canonize(area, pixel);

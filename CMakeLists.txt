@@ -8,9 +8,9 @@ find_package(HDF5 REQUIRED)
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -instrument ${MPI_CXX_COMPILER}")
 
 set(CMAKE_CXX_COMPILER ${MPI_CXX_COMPILER})
-set(CMAKE_BUILD_TYPE DEBUG)
+set(CMAKE_BUILD_TYPE RELEASE)
 set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 
 include_directories(.)
 include_directories(${HDF5_INCLUDE_DIRS})
@@ -24,8 +24,10 @@ set(SOURCE_FILES
     hdf5_wrapper.h
     util.h
 )
+link_directories(${HDF5_LIBRARY_DIRS})
 
 add_executable(dmt ${SOURCE_FILES})
-
-link_directories(${HDF5_LIBRARY_DIRS})
 target_link_libraries(dmt ${HDF5_LIBRARIES})
+
+add_executable(tester tester.cpp)
+target_link_libraries(tester ${HDF5_LIBRARIES})
