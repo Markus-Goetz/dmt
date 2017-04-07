@@ -262,7 +262,7 @@ protected:
     T get_local_tuples(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets, size_t offset) {
         // bucket sort image
         T max_color = 0;
-        Buckets<U> buckets(Image<T>::infinity + 1); // Added by GC
+        Buckets<U> buckets(Image<T>::infinity + 1);
         for (size_t i = 0; i < image.size(); ++i) {
             T color = image[i];
             buckets[color].push_back(i);
@@ -345,8 +345,7 @@ protected:
 
         // right directed communication of minimum
         U* read = parents.data() + (this->rank_ != 0 ? 0 : offset);
-        MPI_Scan(read, recv_buffer.data(), width,
-                 MPI_Types<U>::map(), this->right_stitch_, this->comm_);
+        MPI_Scan(read, recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
 
         // left directed, backwards propagation of right minimum scan results
         for (size_t i = 0; i < width; ++i) {
@@ -529,27 +528,30 @@ protected:
     void resolve_partial_chain(Tuples<T, U>& tuples, AreaRules<U>& area, RootRules<T, U>& roots) {
         // iterate over each tuple and find a root for it and link connected areas
         for (auto& tuple : tuples) {
-            const U from = tuple.from;
-            const U to = tuple.to;
-            const T color = tuple.color;
-            const T neighbor_color = tuple.neighbor_color;
-            const U area_root = this->canonize(area, from);
+            U from = tuple.from;
+            U to = tuple.to;
+            T color = tuple.color;
+            T neighbor_color = tuple.neighbor_color;
 
-            // neighbor color is larger, skip over it while marking roots, check whether it is not normalized though
+            // skip inverse tuples
             if (color < neighbor_color) {
                 continue;
             }
 
             // is this a tuple that joins two area of current color, remap them
             if (color == neighbor_color) {
-                auto found = area.find(from);
-                if (found == area.end()) {
+                if (to > from) std::swap(from, to);
+
+                U canonical_point = this->canonize(area, from);
+                if (from == canonical_point) {
                     area[from] = to;
                 } else {
-                    area[to] = area_root;
+                    area[to] = canonical_point;
                 }
+                continue;
             }
 
+            U area_root = this->canonize(area, from);
             // is there already a root for this tuple, if not just create one
             auto tuple_root_it = roots.find(area_root);
             if (tuple_root_it == roots.end()) {
@@ -564,10 +566,11 @@ protected:
                 continue;
             }
 
+            // correctly colored root we might need to create an area rule
             U to_root = this->canonize(area, to);
-            U root_root = this->canonize(area, root_tuple.second);
-            if (root_tuple.first == neighbor_color and to_root != root_root) {
-                auto from_to = std::minmax(root_root, to_root);
+            U root_canonical_point = this->canonize(area, root_tuple.second);
+            if (root_tuple.first == neighbor_color and to_root != root_canonical_point) {
+                auto from_to = std::minmax(root_canonical_point, to_root);
                 area[from_to.second] = from_to.first;
             }
         }
@@ -654,31 +657,39 @@ protected:
 
     template<typename T, typename U=Parents::type>
     bool remap_tuples(T color, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, RootRules<T, U>& roots) {
-        bool unresolved = false;
-        std::unordered_set<U> keep;
-        std::unordered_set<U> linked;
-
         Tuples<T, U> bucket;
         Tuples<T, U>& tuples = tuple_buckets[color];
         bucket.swap(tuples);
 
+        bool unresolved = false;
         for (auto tuple = bucket.rbegin(); tuple != bucket.rend(); ++tuple) {
             U area_root = this->canonize(area, tuple->from);
 
             // link tuple, normalize the pointed to target
             if (tuple->color == tuple->neighbor_color) {
-                U canonical_point = this->canonize(area, tuple->to);
-                if (tuple->to != canonical_point) {
-                    tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, canonical_point));
+                // inverse tuple, normalize the from part and store it back in the same bucket
+                if (tuple->from < tuple->to) {
+                    unresolved |= (tuple->from != area_root);
+                    tuple->from = area_root;
+                    tuple_buckets[color].push_back(*tuple);
+                // regular area tuple
+                } else {
+                    // directly link from to the new canonical points
+                    if (area_root != tuple->from) {
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, color, area_root));
+                    }
+                    // transitive link to the new canonical point
+                    if (area_root != tuple->to) {
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->to));
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, area_root));
+                    }
                 }
-                tuple->to = canonical_point;
-                tuple_buckets[color].push_back(*tuple);
                 continue;
             }
 
-            // a tuple that needs normalization, keep it in the current bucket
-            if (tuple->from != area_root or keep.find(area_root) != keep.end()) {
-                keep.insert(area_root);
+            // a tuple that needs normalization, keep it in the current bucket and resolve further
+            if (tuple->from != area_root) {
                 tuple->from = area_root;
                 tuples.push_back(*tuple);
                 unresolved = true;
@@ -700,9 +711,7 @@ protected:
             if (root.first > tuple->neighbor_color) {
                 Tuple<T, U> link_tuple(root.first, this->canonize(area, root.second), tuple->neighbor_color, to_root);
                 tuple_buckets[root.first].push_back(link_tuple);
-                if (tuple->to != to_root and linked.find(tuple->to) == linked.end()) {
-                    linked.insert(tuple->to);
-
+                if (tuple->to != to_root ) {
                     tuple_buckets[tuple->neighbor_color].push_back(
                             Tuple<T, U>(tuple->neighbor_color, tuple->to, tuple->neighbor_color, to_root));
 
@@ -711,8 +720,7 @@ protected:
             }
 
             // tuples with the correct colored roots, canonize it and  push the inverse
-            if (tuple->to != to_root and linked.find(tuple->to) == linked.end()) {
-                linked.insert(tuple->to);
+            if (tuple->to != to_root ) {
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
             }
 
@@ -724,30 +732,31 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void final_remap(T color, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, RootRules<T, U>& roots) {
-        std::unordered_set<U> keep;
-        std::unordered_set<U> linked;
-
         Tuples<T, U> bucket;
         Tuples<T, U>& tuples = tuple_buckets[color];
         bucket.swap(tuples);
 
         for (auto tuple = bucket.rbegin(); tuple != bucket.rend(); ++tuple) {
             U area_root = this->canonize(area, tuple->from);
+            U to_root = this->canonize(area, tuple->to);
 
-            // we have an inverse tuple, put it back into its actual bucket
-            const auto root_iter = roots.find(tuple->from);
-            if (root_iter == roots.end()) {
+            // we have an inverse tuple, with an actual root
+            if (tuple->neighbor_color > tuple->color) {
                 Tuple<T, U> inverse(tuple->neighbor_color, tuple->to, color, area_root);
                 tuple_buckets[tuple->neighbor_color].push_back(inverse);
                 continue;
             }
 
-            const Root<T, U>& root = root_iter->second;
-            U to_root = this->canonize(area, tuple->to);
+            // an area tuple
+            if (tuple->neighbor_color == tuple->color and tuple->from < tuple->to) {
+                Tuple<T, U> inverse(tuple->neighbor_color, tuple->to, color, area_root);
+                tuple_buckets[tuple->neighbor_color].push_back(inverse);
+                continue;
+            }
 
+            const Root<T, U>& root = roots.find(tuple->from)->second;
             // tuples with the correct colored roots, canonize it and push the inverse
-            if (tuple->to != to_root and linked.find(tuple->to) == linked.end()) {
-                linked.insert(tuple->to);
+            if (tuple->to != to_root) {
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
             }
 
@@ -858,17 +867,11 @@ protected:
         size_t halo_offset = total_pixels - width;
         std::vector<U> buffer(width);
 
-        for (size_t i = 0; i < width; ++i) {
-            parents[i] = this->canonize(area, parents[i]);
-        }
-        MPI_Scan(parents.data(), buffer.data(), width, MPI_Types<U>::map(), this->left_stitch_, this->reverse_comm_);
-
         for (size_t i = halo_offset; i < total_pixels; ++i) {
             parents[i] = this->canonize(area, parents[i]);
         }
         MPI_Scan(parents.data() + halo_offset, buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
 
-        // 110, 131182
         // canonize the flat areas
         for (auto& pixel : parents) {
             pixel = this->canonize(area, pixel);
@@ -881,4 +884,4 @@ protected:
     };
 };
 
-#endif // DISTRIBUTED_MAX_TREE_H{
+#endif // DISTRIBUTED_MAX_TREE_H
