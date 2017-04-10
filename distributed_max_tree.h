@@ -89,7 +89,6 @@ public:
         Tuples<T, U> resolved_tuples;
         T max_color = this->get_local_tuples(image, parents, tuple_buckets, offset);
         this->connect_halos(image, parents, tuple_buckets, area, offset);
-//        std::cout << parents << " " << area << std::endl;
         this->resolve_tuples(tuple_buckets, max_color);
         this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
         this->generate_parent_image(parents, resolved_tuples, area, offset);
@@ -358,6 +357,7 @@ protected:
         for (const auto& rule : area) {
             T color = image[rule.first - global_offset];
             tuple_buckets[color].push_back(Tuple<T, U>(color, rule.first, color, rule.second));
+            tuple_buckets[color].push_back(Tuple<T, U>(color, rule.second, color, rule.first));
         }
     }
 
@@ -374,31 +374,20 @@ protected:
             if (total == 0) {
                 continue;
             }
-//
-//            // normalize the tuples
-//            if (!halo_area.empty()) {
-//                for (auto& tuple : bucket) {
-//                    tuple.from = this->canonize(halo_area, tuple.from);
-//                    tuple.to = this->canonize(halo_area, tuple.to);
-//                }
-//            }
 
             // resolve the tuple chains
             AreaRules<U> area;
             RootRules<T, U> roots;
             bool unresolved= true;
-//            std::cout << tuple_buckets << std::endl;
             while (unresolved) {
                 area.clear(); roots.clear();
                 this->sample_sort(bucket);
-//                std::cout << bucket << std::endl;
                 this->resolve_partial_chain(bucket, area, roots);
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
             }
             this->final_remap(color, tuple_buckets, area, roots);
-//            std::cout << tuple_buckets << std::endl;
         }
     }
 
@@ -552,10 +541,12 @@ protected:
                 if (to > from) std::swap(from, to);
                 U canonical_point = this->canonize(area, from);
 
-                if (from == canonical_point) {
+                if (to == canonical_point) {
                     area[from] = to;
                 } else {
-                    area[to] = canonical_point;
+                    auto min_max = std::minmax(to, canonical_point);
+                    area[from] = min_max.first;
+                    area[min_max.second] = min_max.first;
                 }
                 continue;
             }
@@ -677,17 +668,24 @@ protected:
             // link tuple, normalize the pointed to target
             if (tuple->color == tuple->neighbor_color) {
                 if (tuple->from > tuple->to) {
-                    tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
-
                     if (tuple->to != area_root) {
                         unresolved = true;
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
                         tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->to));
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, color, area_root));
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, area_root));
+                    } else {
+                        tuple_buckets[color].push_back(*tuple);
                     }
                 } else {
-                    tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, area_root));
                     if (tuple->from != area_root) {
                         unresolved = true;
                         tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, color, area_root));
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, area_root));
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->to));
+                    } else {
+                        tuple_buckets[color].push_back(*tuple);
                     }
                 }
                 continue;
@@ -727,6 +725,7 @@ protected:
             // tuples with the correct colored roots, canonize it and  push the inverse
             if (tuple->to != to_root ) {
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
+                tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, to_root, root.first, tuple->to));
             }
             tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
         }
