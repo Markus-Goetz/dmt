@@ -380,12 +380,13 @@ protected:
             // resolve the tuple chains
             AreaRules<U> area;
             RootRules<T, U> roots;
-            bool unresolved = true;
+            bool unresolved= true;
             while (unresolved) {
                 area.clear(); roots.clear();
                 this->sample_sort(bucket);
                 this->resolve_partial_chain(bucket, area, roots);
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
+//                if (color == 71 and this->rank_ == 0)
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
             }
@@ -541,8 +542,8 @@ protected:
             // is this a tuple that joins two area of current color, remap them
             if (color == neighbor_color) {
                 if (to > from) std::swap(from, to);
-
                 U canonical_point = this->canonize(area, from);
+
                 if (from == canonical_point) {
                     area[from] = to;
                 } else {
@@ -667,22 +668,19 @@ protected:
 
             // link tuple, normalize the pointed to target
             if (tuple->color == tuple->neighbor_color) {
-                // inverse tuple, normalize the from part and store it back in the same bucket
-                if (tuple->from < tuple->to) {
-                    unresolved |= (tuple->from != area_root);
-                    tuple->from = area_root;
-                    tuple_buckets[color].push_back(*tuple);
-                // regular area tuple
-                } else {
-                    // directly link from to the new canonical points
-                    if (area_root != tuple->from) {
-                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
-                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, color, area_root));
-                    }
-                    // transitive link to the new canonical point
-                    if (area_root != tuple->to) {
+//                if (tuple.color == 71 and (tuple.from == 125276 or tuple.to == 125276)) std::cout << tuple << std::endl;
+                if (tuple->from > tuple->to) {
+                    tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
+
+                    if (tuple->to != area_root) {
+                        unresolved = true;
                         tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->to));
-                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, area_root));
+                    }
+                } else {
+                    tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, area_root));
+                    if (tuple->from != area_root) {
+                        unresolved = true;
+                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, color, area_root));
                     }
                 }
                 continue;
@@ -691,7 +689,7 @@ protected:
             // a tuple that needs normalization, keep it in the current bucket and resolve further
             if (tuple->from != area_root) {
                 tuple->from = area_root;
-                tuples.push_back(*tuple);
+                tuple_buckets[color].push_back(*tuple);
                 unresolved = true;
                 continue;
             }
@@ -723,7 +721,6 @@ protected:
             if (tuple->to != to_root ) {
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
             }
-
             tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
         }
 
