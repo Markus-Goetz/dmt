@@ -88,8 +88,9 @@ public:
         // here is the meat!
         Tuples<T, U> resolved_tuples;
         T max_color = this->get_local_tuples(image, parents, tuple_buckets, offset);
-        this->connect_halos(parents, area);
-        this->resolve_tuples(tuple_buckets, area, max_color);
+        this->connect_halos(image, parents, tuple_buckets, area, offset);
+//        std::cout << parents << " " << area << std::endl;
+        this->resolve_tuples(tuple_buckets, max_color);
         this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
         this->generate_parent_image(parents, resolved_tuples, area, offset);
 
@@ -334,8 +335,8 @@ protected:
         return destination;
     }
 
-    template<typename U=Parents::type>
-    void connect_halos(Parents& parents, AreaRules<U>& rules) {
+    template<typename T, typename U=Parents::type>
+    void connect_halos(const Image<T>& image, Parents& parents, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, size_t global_offset) {
         if (this->size_ == 1) return;
 
         size_t width = parents.width();
@@ -349,14 +350,19 @@ protected:
 
         // left directed, backwards propagation of right minimum scan results
         for (size_t i = 0; i < width; ++i) {
-            send_buffer[i] = this->canonize(rules, parents[i + (this->rank_ + 1 == this->size_ ? 0 : offset)]);
+            send_buffer[i] = this->canonize(area, parents[i + (this->rank_ + 1 == this->size_ ? 0 : offset)]);
         }
         MPI_Scan(send_buffer.data(), recv_buffer.data(), width,
                  MPI_Types<U>::map(), this->left_stitch_, this->reverse_comm_);
+
+        for (const auto& rule : area) {
+            T color = image[rule.first - global_offset];
+            tuple_buckets[color].push_back(Tuple<T, U>(color, rule.first, color, rule.second));
+        }
     }
 
     template<typename T, typename U=Parents::type>
-    void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& halo_area, T max_color) {
+    void resolve_tuples(TupleBuckets<T, U>& tuple_buckets, T max_color) {
         for (size_t i = max_color; i != std::numeric_limits<size_t>::max(); --i) {
             // retrieve the current bucket
             T color = static_cast<T>(i);
@@ -368,29 +374,31 @@ protected:
             if (total == 0) {
                 continue;
             }
-
-            // normalize the tuples
-            if (!halo_area.empty()) {
-                for (auto& tuple : bucket) {
-                    tuple.from = this->canonize(halo_area, tuple.from);
-                    tuple.to = this->canonize(halo_area, tuple.to);
-                }
-            }
+//
+//            // normalize the tuples
+//            if (!halo_area.empty()) {
+//                for (auto& tuple : bucket) {
+//                    tuple.from = this->canonize(halo_area, tuple.from);
+//                    tuple.to = this->canonize(halo_area, tuple.to);
+//                }
+//            }
 
             // resolve the tuple chains
             AreaRules<U> area;
             RootRules<T, U> roots;
             bool unresolved= true;
+//            std::cout << tuple_buckets << std::endl;
             while (unresolved) {
                 area.clear(); roots.clear();
                 this->sample_sort(bucket);
+//                std::cout << bucket << std::endl;
                 this->resolve_partial_chain(bucket, area, roots);
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
-//                if (color == 71 and this->rank_ == 0)
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
             }
             this->final_remap(color, tuple_buckets, area, roots);
+//            std::cout << tuple_buckets << std::endl;
         }
     }
 
@@ -668,7 +676,6 @@ protected:
 
             // link tuple, normalize the pointed to target
             if (tuple->color == tuple->neighbor_color) {
-//                if (tuple.color == 71 and (tuple.from == 125276 or tuple.to == 125276)) std::cout << tuple << std::endl;
                 if (tuple->from > tuple->to) {
                     tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
 
