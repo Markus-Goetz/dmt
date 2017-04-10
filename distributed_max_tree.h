@@ -129,10 +129,7 @@ protected:
                 auto it = area.find(local);
 
                 if (it != area.end() and it->second != remote) {
-                    area[local] = std::min(
-                            this->canonize(area, remote),
-                            this->canonize(area, it->second)
-                    );
+                    area[local] = std::min(this->canonize(area, remote), this->canonize(area, it->second));
                 } else if (local != remote) {
                     area[local] = remote;
                 }
@@ -386,6 +383,7 @@ protected:
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
+                //if (color == 110 and this->rank_ == 0) std::cout << "============" << std::endl;
             }
             this->final_remap(color, tuple_buckets, area, roots);
         }
@@ -530,6 +528,10 @@ protected:
             U to = tuple.to;
             T color = tuple.color;
             T neighbor_color = tuple.neighbor_color;
+//
+//            if (from == 101 or to == 101) {
+//                std::cout << tuple << std::endl;
+//            }
 
             // skip inverse tuples
             if (color < neighbor_color) {
@@ -715,19 +717,21 @@ protected:
                 Tuple<T, U> link_tuple(root.first, this->canonize(area, root.second), tuple->neighbor_color, to_root);
                 tuple_buckets[root.first].push_back(link_tuple);
                 if (tuple->to != to_root ) {
-                    tuple_buckets[tuple->neighbor_color].push_back(
-                            Tuple<T, U>(tuple->neighbor_color, tuple->to, tuple->neighbor_color, to_root));
+                    T neighbor_color = tuple->neighbor_color;
+                    Tuples<T, U>& neighbor_bucket = tuple_buckets[neighbor_color];
+                    neighbor_bucket.push_back(Tuple<T, U>(neighbor_color, tuple->to, neighbor_color, to_root));
+                    neighbor_bucket.push_back(Tuple<T, U>(neighbor_color, to_root, neighbor_color, tuple->to));
 
                 }
                 continue;
             }
 
-            // tuples with the correct colored roots, canonize it and  push the inverse
+            // tuples with the correct colored roots, canonize it and push the inverse
+            tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
             if (tuple->to != to_root ) {
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
                 tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, to_root, root.first, tuple->to));
             }
-            tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
         }
 
         return unresolved;
