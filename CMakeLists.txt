@@ -8,9 +8,9 @@ find_package(HDF5 REQUIRED)
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -instrument ${MPI_CXX_COMPILER}")
 
 set(CMAKE_CXX_COMPILER ${MPI_CXX_COMPILER})
-set(CMAKE_BUILD_TYPE RELEASE)
+set(CMAKE_BUILD_TYPE RELWITHDEBINFO)
 set(CMAKE_CXX_STANDARD 11)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -g")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 
 include_directories(.)
 include_directories(${HDF5_INCLUDE_DIRS})

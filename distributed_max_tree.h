@@ -383,7 +383,6 @@ protected:
                 unresolved = this->remap_tuples(color, tuple_buckets, area, roots);
                 // globally done?
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_);
-                //if (color == 110 and this->rank_ == 0) std::cout << "============" << std::endl;
             }
             this->final_remap(color, tuple_buckets, area, roots);
         }
@@ -528,10 +527,6 @@ protected:
             U to = tuple.to;
             T color = tuple.color;
             T neighbor_color = tuple.neighbor_color;
-//
-//            if (from == 101 or to == 101) {
-//                std::cout << tuple << std::endl;
-//            }
 
             // skip inverse tuples
             if (color < neighbor_color) {
