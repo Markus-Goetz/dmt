@@ -9,8 +9,6 @@
 
 template<typename T, typename U=Parents::type>
 struct Tuple {
-    static constexpr size_t bytes = 2 * sizeof(T) + 2 * sizeof(U);
-
     T color = std::numeric_limits<T>::max();
     U from = std::numeric_limits<U>::max();
     T neighbor_color = std::numeric_limits<T>::max();
@@ -53,6 +51,7 @@ struct Tuple {
         return os << ss.str();
     }
 
+
     static void create_mpi_type(MPI_Datatype* type) {
         Tuple <T, U> tuple;
 
@@ -80,19 +79,6 @@ struct Tuple {
 
         MPI_Type_create_struct(parts, counts, displacements, types, type);
         MPI_Type_commit(type);
-    }
-
-    uint64_t htons(uint64_t value) const {
-        value = ((value << 8) & 0xFF00FF00FF00FF00ULL ) | ((value >> 8) & 0x00FF00FF00FF00FFULL );
-        value = ((value << 16) & 0xFFFF0000FFFF0000ULL ) | ((value >> 16) & 0x0000FFFF0000FFFFULL );
-        return (value << 32) | ((value >> 32) & 0xFFFFFFFFULL);
-    }
-
-    void pack(uint8_t* destination) const {
-        destination[0] = this->color;
-        *reinterpret_cast<uint64_t*>(destination + 1) = htons(this->from);
-        destination[9] = this->neighbor_color;
-        *reinterpret_cast<uint64_t*>(destination + 10) = htons(this->to);
     }
 };
 
