@@ -51,7 +51,6 @@ struct Tuple {
         return os << ss.str();
     }
 
-
     static void create_mpi_type(MPI_Datatype* type) {
         Tuple <T, U> tuple;
 
