@@ -2,7 +2,7 @@
 #define DMT_UTIL_H
 
 #include <iostream>
-#include <map>
+#include <unordered_map>
 #include <sstream>
 #include <vector>
 
@@ -25,7 +25,7 @@ std::ostream& operator<<(std::ostream& os, const std::vector<T>& v) {
 }
 
 template<typename T, typename U>
-std::ostream& operator<<(std::ostream& os, const std::map<T, U>& m) {
+std::ostream& operator<<(std::ostream& os, const std::unordered_map<T, U>& m) {
     std::stringstream ss;
     ss << "{";
     if (m.size() > 0) {

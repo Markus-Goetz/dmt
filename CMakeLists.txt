@@ -16,7 +16,7 @@ include_directories(.)
 include_directories(${HDF5_INCLUDE_DIRS})
 set(SOURCE_FILES
     distributed_max_tree.h
-    endpoint.h
+    endpoints.h
     image.h
     main.cpp
     tuple.h
