@@ -82,14 +82,17 @@ public:
         this->create_area_connect_op<U>();
         this->create_root_find_op<T, U>();
 
-        // here is the meat!
+        // distributed resolution
         TupleBuckets<T, U> root_buckets = this->get_local_tuples(image, parents, offset);
         TupleBuckets<T, U> area_buckets = this->connect_halos(image, parents, offset, area, root_buckets.size());
         this->resolve_tuples(area_buckets, root_buckets);
-        std::cout << root_buckets << std::endl;
-        std::cout << area_buckets << std::endl;
-//        Tuples<T, U> resolved_tuples = this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
-//        this->generate_parent_image(parents, resolved_tuples, area, offset);
+
+        // send tuples to owners and apply
+        Tuples<T, U> resolved_area;
+        Tuples<T, U> resolved_roots;
+        this->redistribute_tuples(image, area_buckets, resolved_area);
+        this->redistribute_tuples(image, root_buckets, resolved_roots);
+        this->generate_parent_image(parents, resolved_area, resolved_roots, offset);
 
         // MPI clean up
         MPI_Op_free(&this->area_connect_);
@@ -843,119 +846,109 @@ protected:
             area_bucket.push_back(Tuple<T, U>(tuple_color, to, tuple_color, from));
         }
     };
-//
-//    template<typename T, typename U=Parents::type>
-//    void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& tuple_buckets, Tuples<T, U>& incoming) {
-//        if (this->size_ == 1) {
-//            for (const auto& bucket : tuple_buckets) {
-//                incoming.insert(incoming.end(), bucket.begin(), bucket.end());
-//            }
-//            return;
-//        }
-//
-//        // determine the total number of pixels in the image
-//        size_t total_height = image.height() - (this->rank_ + 1 != this->size_ ? 1 : 0);
-//        MPI_Allreduce(MPI_IN_PLACE, &total_height, 1, MPI_Types<decltype(total_height)>::map(), MPI_SUM, this->comm_);
-//
-//        // chunk up the image to determine tuple target ranks
-//        size_t width = image.width();
-//        U total_tuples = 0;
-//        U chunk = total_height / this->size_ * width;
-//        U remainder = total_height % this->size_;
-//
-//        // calculate which tuple goes where
-//        std::vector<int> send_counts(static_cast<size_t>(this->size_), 0);
-//        std::vector<int> recv_counts(static_cast<size_t>(this->size_), 0);
-//        for (const auto& bucket : tuple_buckets) {
-//            for (const auto& tuple : bucket) {
-//                U target_rank = tuple.from / chunk;
-//                while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
-//                    if (target_rank == 0) break;
-//                    --target_rank;
-//                }
-//                ++send_counts[target_rank];
-//                ++total_tuples;
-//            }
-//        }
-//        // exchange the histogram with the other ranks
-//        MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, this->comm_);
-//
-//        //  calculate the buffer displacements
-//        U total_received_tuples = recv_counts[0];
-//        std::vector<int> send_displs(this->size_, 0);
-//        std::vector<int> recv_displs(this->size_, 0);
-//        for (size_t i = 1; i < send_displs.size(); ++i) {
-//            total_received_tuples += recv_counts[i];
-//            send_displs[i] = send_displs[i - 1] + send_counts[i - 1];
-//            recv_displs[i] = recv_displs[i - 1] + recv_counts[i - 1];
-//        }
-//
-//        Tuples<T, U> outgoing(total_tuples);
-//        incoming.resize(total_received_tuples);
-//        std::vector<int> placement = send_displs;
-//
-//        for (auto& bucket : tuple_buckets) {
-//            for (auto& tuple : bucket) {
-//                U target_rank = tuple.from / chunk;
-//                while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
-//                    if (target_rank == 0) break;
-//                    --target_rank;
-//                }
-//                int& position = placement[target_rank];
-//                outgoing[position] = tuple;
-//                ++position;
-//            }
-//            bucket.clear();
-//        }
-//
-//        MPI_Alltoallv(outgoing.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
-//                      incoming.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
-//    };
-//
-//    template<typename T, typename U=Parents::type>
-//    void generate_parent_image(Parents& parents, Tuples<T, U>& resolved, AreaRules<U>& area, size_t offset) {
-//        RootRules<T, U> roots;
-//        U nodes = 0;
-//        area.clear();
-//
-//        // parse the tuples and store the results in the area/roots map
-//        for (auto& tuple : resolved) {
-//            if (tuple.color != tuple.neighbor_color) {
-//                roots[tuple.from] = Root<T, U>(tuple.neighbor_color, tuple.to);
-//                ++nodes;
-//            } else {
-//                area[tuple.from] = tuple.to;
-//            }
-//        }
-//
-//        // normalize the halo zone and communicate it to the neighbor nodes
-//        size_t width = parents.width();
-//        size_t total_pixels = width * parents.height();
-//        size_t halo_offset = total_pixels - width;
-//        std::vector<U> buffer(width);
-//
-//        for (size_t i = halo_offset; i < total_pixels; ++i) {
-//            parents[i] = this->canonize(area, parents[i]);
-//        }
-//        MPI_Scan(parents.data() + halo_offset, buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
-//
-//        // canonize the flat areas
-//        for (auto& pixel : parents) {
-//            pixel = this->canonize(area, pixel);
-//        }
-//
-//        // and finally set the roots
-//        for (const auto& root : roots) {
-//            parents[root.first - offset] = root.second.second;
-//        }
-//
-//        // compute the number of nodes
-//        MPI_Reduce(this->rank_ == 0 ? MPI_IN_PLACE : &nodes, &nodes, 1, MPI_Types<U>::map(), MPI_SUM, 0, this->comm_);
-//        if (this->rank_ == 0) {
-//            ++nodes;
-//            std::cout << "Number of nodes: " << nodes << std::endl;
-//        }
-//    };
+
+    template<typename T, typename U=Parents::type>
+    void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& buckets, Tuples<T, U>& resolved) {
+        if (this->size_ == 1) {
+            return;
+        }
+
+        // determine the total number of pixels in the image
+        size_t total_height = image.height() - (this->rank_ + 1 != this->size_ ? 1 : 0);
+        MPI_Allreduce(MPI_IN_PLACE, &total_height, 1, MPI_Types<decltype(total_height)>::map(), MPI_SUM, this->comm_);
+
+        // chunk up the image to determine tuple target ranks
+        size_t width = image.width();
+        U total_tuples = 0;
+        U chunk = total_height / this->size_ * width;
+        U remainder = total_height % this->size_;
+
+        // calculate which tuple goes where
+        std::vector<int> send_counts(static_cast<size_t>(this->size_), 0);
+        std::vector<int> recv_counts(static_cast<size_t>(this->size_), 0);
+        for (const auto& bucket : buckets) {
+            for (const auto& tuple : bucket) {
+                U target_rank = tuple.from / chunk;
+                while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
+                    if (target_rank == 0) break;
+                    --target_rank;
+                }
+                ++send_counts[target_rank];
+                ++total_tuples;
+            }
+        }
+        // exchange the histogram with the other ranks
+        MPI_Alltoall(send_counts.data(), 1, MPI_INT, recv_counts.data(), 1, MPI_INT, this->comm_);
+
+        //  calculate the buffer displacements
+        U total_received_tuples = recv_counts[0];
+        std::vector<int> send_displs(this->size_, 0);
+        std::vector<int> recv_displs(this->size_, 0);
+        for (size_t i = 1; i < send_displs.size(); ++i) {
+            total_received_tuples += recv_counts[i];
+            send_displs[i] = send_displs[i - 1] + send_counts[i - 1];
+            recv_displs[i] = recv_displs[i - 1] + recv_counts[i - 1];
+        }
+
+        Tuples<T, U> outgoing(total_tuples);
+        resolved.resize(total_received_tuples);
+        std::vector<int> placement = send_displs;
+
+        for (auto& bucket : buckets) {
+            for (auto& tuple : bucket) {
+                U target_rank = tuple.from / chunk;
+                while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
+                    if (target_rank == 0) break;
+                    --target_rank;
+                }
+                int& position = placement[target_rank];
+                outgoing[position] = tuple;
+                ++position;
+            }
+            bucket.clear();
+        }
+
+        MPI_Alltoallv(outgoing.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
+                      resolved.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
+    };
+
+    template<typename T, typename U=Parents::type>
+    void generate_parent_image(Parents& parents, Tuples<T, U>& resolved_area, Tuples<T, U>& resolved_roots, size_t offset) {
+        // parse the area tuples and memorize area rules
+        AreaRules<U> area;
+        for (const auto& tuple : resolved_area) {
+            area[tuple.from] = tuple.to;
+        }
+
+        // normalize the halo zone and communicate it to the neighbor nodes
+        size_t width = parents.width();
+        size_t total_pixels = width * parents.height();
+        size_t halo_offset = total_pixels - width;
+        std::vector<U> buffer(width);
+
+        for (size_t i = halo_offset; i < total_pixels; ++i) {
+            parents[i] = this->canonize(area, parents[i]);
+        }
+        MPI_Scan(parents.data() + halo_offset, buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
+
+        // canonize the flat areas
+        for (auto& pixel : parents) {
+            pixel = this->canonize(area, pixel);
+        }
+
+        // and finally set the roots
+        for (const auto& root : resolved_roots) {
+            parents[root.from - offset] = root.to;
+        }
+
+        // compute the number of nodes
+        U nodes = resolved_roots.size();
+        MPI_Reduce(this->rank_ == 0 ? MPI_IN_PLACE : &nodes, &nodes, 1, MPI_Types<U>::map(), MPI_SUM, 0, this->comm_);
+        if (this->rank_ == 0) {
+            ++nodes;
+            std::cout << "Number of nodes: " << nodes << std::endl;
+        }
+    };
 };
 
 #endif // DISTRIBUTED_MAX_TREE_H
