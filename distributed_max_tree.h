@@ -56,8 +56,7 @@ std::ostream& operator<<(std::ostream& os, const TupleBuckets<T, U>& v) {
 
 class DistributedMaxTree {
 public:
-    DistributedMaxTree(MPI_Comm comm = MPI_COMM_WORLD)
-            : comm_(comm) {
+    DistributedMaxTree(MPI_Comm comm = MPI_COMM_WORLD) : comm_(comm) {
         MPI_Comm_rank(comm, &this->rank_);
         MPI_Comm_size(comm, &this->size_);
     }
@@ -65,9 +64,6 @@ public:
     template<typename T, typename U=Parents::type>
     Parents compute(const Image<T>& image) {
         AreaRules<U> area;
-
-        // create the reverse communicator used for the stitching scans
-        MPI_Comm_split(this->comm_, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
 
         // calculate the global pixel offset
         size_t offset = image.size() - image.width();
@@ -78,32 +74,30 @@ public:
         Parents parents(Parents::infinity, image.width(), image.height());
 
         // MPI type and op creation
+        MPI_Comm_split(this->comm_, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
         Tuple<T, U>::create_mpi_type(&this->tuple_type_);
         AreaEndpoint<U>::create_mpi_type(&this->area_endpoint_type_);
-        Endpoint<T, U>::create_mpi_type(&this->endpoint_type_);
-
         this->create_right_stitch_op<U>(parents, area);
         this->create_left_stitch_op<U>(parents, area);
         this->create_area_connect_op<U>();
-//        this->create_level_connect_op<T, U>();
+        this->create_root_find_op<T, U>();
 
         // here is the meat!
         TupleBuckets<T, U> root_buckets = this->get_local_tuples(image, parents, offset);
         TupleBuckets<T, U> area_buckets = this->connect_halos(image, parents, offset, area, root_buckets.size());
         this->resolve_tuples(area_buckets, root_buckets);
+        std::cout << root_buckets << std::endl;
+        std::cout << area_buckets << std::endl;
 //        Tuples<T, U> resolved_tuples = this->redistribute_tuples(image, tuple_buckets, resolved_tuples);
 //        this->generate_parent_image(parents, resolved_tuples, area, offset);
 
         // MPI clean up
         MPI_Op_free(&this->area_connect_);
-//        MPI_Op_free(&this->level_connect_);
+        MPI_Op_free(&this->root_find_);
         MPI_Op_free(&this->left_stitch_);
         MPI_Op_free(&this->right_stitch_);
-
-        MPI_Type_free(&this->endpoint_type_);
         MPI_Type_free(&this->area_endpoint_type_);
         MPI_Type_free(&this->tuple_type_);
-
         MPI_Comm_free(&this->reverse_comm_);
 
         return parents;
@@ -115,54 +109,14 @@ protected:
 
     MPI_Datatype tuple_type_;
     MPI_Datatype area_endpoint_type_;
-    MPI_Datatype endpoint_type_;
 
     MPI_Op right_stitch_;
     MPI_Op left_stitch_;
     MPI_Op area_connect_;
-//    MPI_Op level_connect_;
+    MPI_Op root_find_;
 
     int rank_;
     int size_;
-
-    template <typename T, typename U=Parents::type>
-    void radix_sort(Tuples<T, U>& tuples) {
-        const size_t bytes = sizeof(Tuple<T, U>);
-        uint8_t buffer[Tuple<T, U>::bytes];
-
-        std::vector<size_t> histogram(bytes * (std::numeric_limits<uint8_t>::max() + 1));
-        std::vector<size_t> displacement(bytes * (std::numeric_limits<uint8_t>::max() + 1));
-
-        // calculate histogram
-        for (auto& tuple : tuples) {
-            tuple.pack(buffer);
-            for (size_t i = bytes - 1; i != std::numeric_limits<size_t>::max(); --i) {
-                ++histogram[i * (std::numeric_limits<uint8_t>::max() + 1) + buffer[i]];
-            }
-        }
-
-        // calculate offsets
-        for (size_t i = 0; i < bytes; ++i) {
-            for (size_t j = 1; j < (std::numeric_limits<uint8_t>::max() + 1); ++j) {
-                displacement[i * (std::numeric_limits<uint8_t>::max() + 1) + j] =
-                        displacement[i * (std::numeric_limits<uint8_t>::max() + 1) + j - 1] +
-                        histogram[i * (std::numeric_limits<uint8_t>::max() + 1) + j - 1];
-            }
-        }
-
-        // radix sort
-        Tuples<T, U> output(tuples.size());
-        for (size_t i = bytes - 1; i != std::numeric_limits<size_t>::max(); --i) {
-            for (auto& tuple : tuples) {
-                tuple.pack(buffer);
-                size_t& target = displacement[i * (std::numeric_limits<uint8_t>::max() + 1) + buffer[i]];
-                output[target] = tuple;
-                ++target;
-            }
-            tuples.swap(output);
-        }
-        tuples.swap(output);
-    };
 
     template<typename U=Parents::type>
     void create_right_stitch_op(const Parents& parents, AreaRules<U>& area) {
@@ -233,7 +187,7 @@ protected:
             AreaEndpoint<U>& out_right = out[1];
             AreaEndpoint<U>& in_right = in[1];
 
-            if (in_right.from == out_left.from) {
+            if (in_right.from == out_left.from or in_right.from == out_left.to) {
                 out_left.canonical_to = std::min(in_right.canonical_to, out_left.canonical_to);
             }
 
@@ -246,39 +200,32 @@ protected:
         MPI_Op_create(connect, false, &this->area_connect_);
     }
 
-//    template<typename T, typename U=Parents::type>
-//    void create_level_connect_op() {
-//        auto connect = [](void* in_, void* out_, int*, MPI_Datatype*) {
-//            Endpoint<T, U>* in = reinterpret_cast<Endpoint<T, U>*>(in_);
-//            Endpoint<T, U>* out = reinterpret_cast<Endpoint<T, U>*>(out_);
-//
-//            Endpoint<T, U>& out_left = out[0];
-//            Endpoint<T, U>& out_right = out[1];
-//            Endpoint<T, U>& in_right = in[1];
-//
-//            if (in_right.from == out_left.from) {
-//                out_left.current_from = std::min(in_right.current_from, out_left.current_from);
-//
-//                if ((out_left.from == out_left.current_root_to) or // became a node
-//                    (in_right.current_root_color > out_left.current_root_color) or // closer colored root
-//                    (in_right.current_root_color == out_left.current_root_color and // same colored root, but ...
-//                     in_right.current_root_to < out_left.current_root_to)) { // ... smaller canonical point
-//                    out_left.current_root_color = in_right.current_root_color;
-//                    out_left.current_root_to = in_right.current_root_to;
-//                }
-//            } else if (in_right.start_root_to == out_left.current_root_to and
-//                       in_right.current_root_color == in_right.start_root_color) {
-//                out_left.current_root_to = std::min(in_right.current_root_to, out_left.current_root_to);
-//            }
-//
-//            // very long chain? just copy the already merged values
-//            if (out_left.from == out_right.from) {
-//                out_right = out_left;
-//            }
-//        };
-//
-//        MPI_Op_create(connect, false, &this->level_connect_);
-//    }
+    template<typename T, typename U=Parents::type>
+    void create_root_find_op() {
+        auto connect = [](void* in_, void* out_, int*, MPI_Datatype*) {
+            Endpoints<T, U>* in = reinterpret_cast<Endpoints<T, U>*>(in_);
+            Endpoints<T, U>* out = reinterpret_cast<Endpoints<T, U>*>(out_);
+
+            Tuple<T, U>& in_right = in->back();
+            Tuple<T, U>& out_left = out->front();
+            Tuple<T, U>& out_right = out->back();
+
+            if (in_right.from == out_left.from and (
+                   (in_right.neighbor_color > out_left.neighbor_color) or
+                   (in_right.neighbor_color == out_left.neighbor_color and in_right.to < out_left.to)
+                )) {
+                out_left.neighbor_color = in_right.neighbor_color;
+                out_left.to = in_right.to;
+            }
+
+            // very long chain? just copy the already merged values
+            if (out_left.from == out_right.from) {
+                out_right = out_left;
+            }
+        };
+
+        MPI_Op_create(connect, false, &this->root_find_);
+    }
 
     template<typename T, typename U=Parents::type>
     Neighbors<T> lower_neighbors(const Image<T>& image, U position) {
@@ -461,14 +408,14 @@ protected:
                 unresolved = this->remap_area_tuples(area_bucket, area);
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_); // globally done?
             }
-
-            // put the correct area tuple into the root bucket
-            for (const auto& tuple : area_bucket) {
-                if (tuple.from > tuple.to) {
-                    root_bucket.push_back(tuple);
-                }
-            }
+            add_area_tuples_to_roots(root_bucket, area_bucket);
             this->resolve_roots(color, root_buckets, area_buckets);
+//
+//            if (color == 3) {
+//                std::cout << root_buckets << std::endl;
+//                std::cout << area_buckets << std::endl;
+//                std::exit(0);
+//            }
         }
     }
 
@@ -696,6 +643,16 @@ protected:
     };
 
     template <typename T, typename U=Parents::type>
+    void add_area_tuples_to_roots(Tuples<T, U>& root_bucket, Tuples<T, U>& area_bucket) {
+        // put the correct area tuple into the root bucket
+        for (const auto& tuple : area_bucket) {
+            if (tuple.from > tuple.to) {
+                root_bucket.push_back(tuple);
+            }
+        }
+    }
+
+    template <typename T, typename U=Parents::type>
     void resolve_roots(T color, TupleBuckets<T, U>& root_buckets, TupleBuckets<T, U>& area_buckets) {
         Tuples<T, U> tuples;
         Tuples<T, U>& root_tuples = root_buckets[color];
@@ -705,6 +662,8 @@ protected:
         root_tuples.swap(tuples);
         area_tuples.clear();
 
+        // normalize tuples
+        this->sample_sort(tuples);
         const size_t wrap_bound = std::numeric_limits<size_t>::max();
         const size_t tuple_count = tuples.size();
 
@@ -713,39 +672,21 @@ protected:
         U right_from = tuple_count > 0 ? tuples.back().from : std::numeric_limits<U>::max();
         U right_to = right_from;
 
-        // normalize tuples
-        this->sample_sort(tuples);
         for (size_t i = 0; i < tuple_count; ++i) {
-            auto& tuple = tuples[i];
-            if (tuple.color != tuple.neighbor_color) continue;
-
-            U from = tuple.from;
-            U to = tuple.to;
-            size_t j = i - 1;
-            while (j != wrap_bound and tuples[j].from == from) {
-                Tuple<T, U>& root_tuple = tuples[j];
-                root_tuples.push_back(Tuple<T, U>(root_tuple.color, to, root_tuple.neighbor_color, root_tuple.to));
-                --j;
-            }
-            if (j + 1 == 0) left_to = to;
-
-            size_t k = i + 1;
-            while (i + k < tuple_count and tuples[k].from == from) {
-                Tuple<T, U>& inverse = tuples[k];
-                T neighbor_color = inverse.neighbor_color;
-                root_buckets[neighbor_color].push_back(Tuple<T, U>(neighbor_color, inverse.to, inverse.color, to));
-                ++k;
-            }
-            if (k - 1 == tuple_count) right_to = to;
-
-            i += k - 1;
-            area_tuples.push_back(tuple);
+            Tuple<T, U>& tuple = tuples[i];
+            if (tuple.from != left_from) break;
+            if (tuple.color == tuple.neighbor_color) left_to = tuple.to;
+        }
+        for (size_t i = tuple_count - 1; i < wrap_bound; --i) {
+            Tuple<T, U>& tuple = tuples[i];
+            if (tuple.from != right_from) break;
+            if (tuple.color == tuple.neighbor_color) right_to = tuple.to;
         }
 
         // stitch the normalization at the bucket edges
         AreaEndpoints<U> ends = {
-                AreaEndpoint<U>(left_from, left_to, left_to),
-                AreaEndpoint<U>(right_from, right_to, right_to)
+            AreaEndpoint<U>(left_from, left_to, left_to),
+            AreaEndpoint<U>(right_from, right_to, right_to)
         };
         MPI_Scan(MPI_IN_PLACE, ends.data(), ends.size(), this->area_endpoint_type_, this->area_connect_, this->comm_);
         ends.front().to = ends.front().canonical_to;
@@ -757,299 +698,151 @@ protected:
         ends.back().to = ends.back().canonical_to;
         std::swap(ends.front(), ends.back());
 
-        for (size_t i = 0; i < tuple_count and tuples[i].from == left_from; ++i) {
-            Tuple<T, U>& tuple = tuples[i];
-            if (tuple.color < tuple.neighbor_color) {
-                T neighbor_color = tuple.neighbor_color;
-                root_buckets[neighbor_color].push_back(Tuple<T, U>(neighbor_color, ends.front().to, tuple.color, tuple.from));
-            } else if (tuple.color > tuple.neighbor_color) {
-                root_tuples.push_back(Tuple<T, U>(tuple.color, ends.front().to, tuple.neighbor_color, tuple.to));
+        for (size_t i = 0; i < tuple_count; ++i) {
+            auto& tuple = tuples[i];
+            U normalized = tuple.from;
+            if (normalized == left_from) normalized = ends[0].canonical_to;
+            else if (normalized == right_from) normalized = ends[1].canonical_to;
+
+            // case 1: regular tuple, normalize from if at edge
+            if (tuple.color > tuple.neighbor_color) {
+                tuple.from = normalized;
+                root_tuples.push_back(tuple);
+            // case 2: area tuple, normalize left and right
+            } else if (tuple.color == tuple.neighbor_color) {
+                area_tuples.push_back(tuple);
+                normalized = tuple.to;
+
+                // correct the root tuples to the left
+                size_t j = root_tuples.size() - 1;
+                while (j != wrap_bound and root_tuples[j].from == tuple.from) {
+                    Tuple<T, U>& root_tuple = root_tuples[j];
+                    root_tuple.from = normalized;
+                    --j;
+                }
+
+                // correct inverse tuples to the right
+                size_t k = i + 1;
+                while (k < tuple_count and tuples[k].from == tuple.from) {
+                    Tuple<T, U>& inverse = tuples[k];
+                    inverse.from = normalized;
+                    std::swap(inverse.color, inverse.neighbor_color);
+                    std::swap(inverse.from, inverse.to);
+                    root_buckets[inverse.color].push_back(inverse);
+                    ++k;
+                }
+                i = k - 1;
+            // case 3: inverse tuple at edge, normalize from, invert and put pack in original bucket
+            } else {
+                tuple.from = normalized;
+                std::swap(tuple.color, tuple.neighbor_color);
+                std::swap(tuple.from, tuple.to);
+                root_buckets[tuple.color].push_back(tuple);
             }
         }
 
-        for (size_t i = tuple_count - 1; i != wrap_bound and tuples[i].from == right_from; --i) {
-            Tuple<T, U>& tuple = tuples[i];
-            if (tuple.color < tuple.neighbor_color) {
-                T neighbor_color = tuple.neighbor_color;
-                root_buckets[neighbor_color].push_back(Tuple<T, U>(neighbor_color, ends.back().to, tuple.color, tuple.from));
-            } else if (tuple.color > tuple.neighbor_color) {
-                root_tuples.push_back(Tuple<T, U>(tuple.color, ends.back().to, tuple.neighbor_color, tuple.to));
-            }
-        }
-
-        this->sample_sort(root_tuples);
         RootRules<T, U> roots;
+        this->sample_sort(root_tuples);
         for (auto& tuple : root_tuples) {
+            auto root_iter = roots.find(tuple.from);
+            if (root_iter == roots.end()) {
+                roots[tuple.from] = Root<T, U>(tuple.neighbor_color, tuple.to);
+                continue;
+            }
 
+            Root<T, U>& root = root_iter->second;
+            if (root.first < tuple.neighbor_color or (root.first == tuple.neighbor_color and root.second > tuple.to)) {
+                root.first = tuple.neighbor_color;
+                root.second = tuple.to;
+            }
         }
 
-        if (color == 198) {
-            std::cout << root_tuples << std::endl;
-            std::cout << area_tuples << std::endl;
-        }
+        Endpoints<T, U> root_ends;
+        this->initialize_ends(root_ends, root_tuples, roots);
+        MPI_Scan(MPI_IN_PLACE, root_ends.data(), root_ends.size(), this->tuple_type_, this->root_find_, this->comm_);
+        this->stitch_ends(root_ends, roots);
 
+        this->initialize_ends(root_ends, root_tuples, roots);
+        std::swap(root_ends.front(), root_ends.back());
+        MPI_Scan(MPI_IN_PLACE, root_ends.data(), root_ends.size(), this->tuple_type_, this->root_find_, this->reverse_comm_);
+        std::swap(root_ends.front(), root_ends.back());
+        this->stitch_ends(root_ends, roots);
 
-        // sort all tuples globally and solve the root
-//        this->sample_sort(tuples);
-//
-//        RootRules<T, U> roots;
-//        for (auto& tuple : tuples) {
-//
-//        }
+        this->remap_root_tuples(color, root_buckets, area_buckets, roots);
     };
 
-//    template<typename T, typename U=Parents::type>
-//    void resolve_partial_chain(Tuples<T, U>& tuples, AreaRules<U>& area, RootRules<T, U>& roots) {
-//        // iterate over each tuple and find a root for it and link connected areas
-//        for (auto& tuple : tuples) {
-//            U from = tuple.from;
-//            U to = tuple.to;
-//            T color = tuple.color;
-//            T neighbor_color = tuple.neighbor_color;
-//
-//            // skip inverse tuples
-//            if (color < neighbor_color) {
-//                continue;
-//            }
-//
-//            // is this a tuple that joins two area of current color, remap them
-//            if (color == neighbor_color) {
-//                if (to > from) std::swap(from, to);
-//                U canonical_point = this->canonize(area, from);
-//
-//                if (to == canonical_point) {
-//                    area[from] = to;
-//                } else {
-//                    auto min_max = std::minmax(to, canonical_point);
-//                    area[from] = min_max.first;
-//                    area[min_max.second] = min_max.first;
-//                }
-//                continue;
-//            }
-//
-//            U area_root = this->canonize(area, from);
-//            // is there already a root for this tuple, if not just create one
-//            auto tuple_root_it = roots.find(area_root);
-//            if (tuple_root_it == roots.end()) {
-//                roots[area_root] = Root<T, U>(neighbor_color, to);
-//                continue;
-//            }
-//
-//            // there is already a root, select either the closer one or join the two areas
-//            Root<T, U>& root_tuple = tuple_root_it->second;
-//            if (root_tuple.first < neighbor_color and neighbor_color < color) {
-//                roots[area_root] = Root<T, U>(neighbor_color, to);
-//                continue;
-//            }
-//
-//            // correctly colored root we might need to create an area rule
-//            U to_root = this->canonize(area, to);
-//            U root_canonical_point = this->canonize(area, root_tuple.second);
-//            if (root_tuple.first == neighbor_color and to_root != root_canonical_point) {
-//                auto from_to = std::minmax(root_canonical_point, to_root);
-//                area[from_to.second] = from_to.first;
-//            }
-//        }
-//
-//        if (this->size_ == 1) return;
-//        // tuple chain is locally resolved, exchange information globally
-//        Endpoints<T, U> ends;
-//        this->initialize_ends(ends, tuples, area, roots);
-//        MPI_Scan(MPI_IN_PLACE, ends.data(), ends.size(), this->endpoint_type_, this->level_connect_, this->comm_);
-//        this->stitch_ends(tuples, ends, area, roots);
-//
-//        this->initialize_ends(ends, tuples, area, roots);
-//        std::swap(ends.front(), ends.back());
-//        MPI_Scan(MPI_IN_PLACE, ends.data(), ends.size(), this->endpoint_type_, this->level_connect_, this->reverse_comm_);
-//        std::swap(ends.front(), ends.back());
-//        this->stitch_ends(tuples, ends, area, roots);
-//    }
-//
-//    template<typename T, typename U=Parents::type>
-//    void initialize_ends(Endpoints<T, U>& ends, Tuples<T, U>& tuples, AreaRules<U>& area, RootRules<T, U>& roots) {
-//        if (tuples.empty()) return;
-//
-//        Tuple<T, U>& front = tuples.front();
-//        Endpoint<T, U>& left = ends.front();
-//
-//        left.color = front.color;
-//        left.from = front.from;
-//        left.start_root_color = front.neighbor_color;
-//        left.start_root_to = front.to;
-//
-//        auto root_iter = roots.find(left.from);
-//        Root<T, U>&& root = (root_iter != roots.end()) ? root_iter->second : Root<T, U>(front.color, front.from);
-//        left.current_from = this->canonize(area, left.from);
-//        left.current_root_color = root.first;
-//        left.current_root_to = this->canonize(area, root.second);
-//
-//        Tuple<T, U>& back = tuples.back();
-//        Endpoint<T, U>& right = ends.back();
-//
-//        right.color = back.color;
-//        right.from = back.from;
-//        right.start_root_color = back.neighbor_color;
-//        right.start_root_to = back.to;
-//
-//        root_iter = roots.find(right.from);
-//        root = (root_iter != roots.end()) ? root_iter->second : Root<T, U>(back.color, back.from);
-//        right.current_from = this->canonize(area, right.from);
-//        right.current_root_color = root.first;
-//        right.current_root_to = this->canonize(area, root.second);
-//    };
-//
-//    template<typename T, typename U=Parents::type>
-//    void stitch_ends(Tuples<T, U>& tuples, Endpoints<T, U>& ends, AreaRules<U>& area, RootRules<T, U>& roots) {
-//        if (tuples.empty()) return;
-//
-//        const Tuple<T, U>& front = tuples.front();
-//        const Tuple<T, U>& back = tuples.back();
-//
-//        const Endpoint<T, U>& left = ends.front();
-//        const Endpoint<T, U>& right = ends.back();
-//
-//        if (front.from != left.current_from) {
-//            area[front.from] = left.current_from;
-//        }
-//        if (back.from != right.current_from) {
-//            area[back.from] = right.current_from;
-//        }
-//
-//        Root<T, U>& front_root = roots[front.from];
-//        Root<T, U>& back_root = roots[back.from];
-//
-//        if (front_root.first == left.current_root_color and front_root.second > left.current_root_to) {
-//            area[front_root.second] = left.current_root_to;
-//        }
-//        if (back_root.first == right.current_root_color and back_root.second > right.current_root_to) {
-//            area[back_root.second] = right.current_root_to;
-//        }
-//
-//        front_root.first = left.current_root_color;
-//        front_root.second = left.current_root_to;
-//        back_root.first = right.current_root_color;
-//        back_root.second = right.current_root_to;
-//    };
-//
-//    template<typename T, typename U=Parents::type>
-//    bool remap_tuples(T color, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, RootRules<T, U>& roots) {
-//        Tuples<T, U> bucket;
-//        Tuples<T, U>& tuples = tuple_buckets[color];
-//        bucket.swap(tuples);
-//
-//        bool unresolved = false;
-//        for (auto tuple = bucket.rbegin(); tuple != bucket.rend(); ++tuple) {
-//            U area_root = this->canonize(area, tuple->from);
-//
-//            // link tuple, normalize the pointed to target
-//            if (tuple->color == tuple->neighbor_color) {
-//                if (tuple->from > tuple->to) {
-//                    if (tuple->to != area_root) {
-//                        unresolved = true;
-//                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
-//                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->to));
-//                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, color, area_root));
-//                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, area_root));
-//                    } else {
-//                        tuple_buckets[color].push_back(*tuple);
-//                    }
-//                } else {
-//                    if (tuple->from != area_root) {
-//                        unresolved = true;
-//                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, color, area_root));
-//                        tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->to, color, area_root));
-//                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->from));
-//                        tuple_buckets[color].push_back(Tuple<T, U>(color, area_root, color, tuple->to));
-//                    } else {
-//                        tuple_buckets[color].push_back(*tuple);
-//                    }
-//                }
-//                continue;
-//            }
-//
-//            // a tuple that needs normalization, keep it in the current bucket and resolve further
-//            if (tuple->from != area_root) {
-//                tuple->from = area_root;
-//                tuple_buckets[color].push_back(*tuple);
-//                unresolved = true;
-//                continue;
-//            }
-//
-//            // we have an inverse tuple, put it back into its actual bucket
-//            const auto root_iter = roots.find(tuple->from);
-//            if (root_iter == roots.end()) {
-//                Tuple<T, U> inverse(tuple->neighbor_color, tuple->to, color, area_root);
-//                tuple_buckets[tuple->neighbor_color].push_back(inverse);
-//                continue;
-//            }
-//
-//            // a tuple with a target to high up in the tree compared  actual root, link the root and the target
-//            const Root<T, U>& root = root_iter->second;
-//            U to_root = this->canonize(area, tuple->to);
-//
-//            if (root.first > tuple->neighbor_color) {
-//                Tuple<T, U> link_tuple(root.first, this->canonize(area, root.second), tuple->neighbor_color, to_root);
-//                tuple_buckets[root.first].push_back(link_tuple);
-//                if (tuple->to != to_root ) {
-//                    T neighbor_color = tuple->neighbor_color;
-//                    Tuples<T, U>& neighbor_bucket = tuple_buckets[neighbor_color];
-//                    neighbor_bucket.push_back(Tuple<T, U>(neighbor_color, tuple->to, neighbor_color, to_root));
-//                    neighbor_bucket.push_back(Tuple<T, U>(neighbor_color, to_root, neighbor_color, tuple->to));
-//
-//                }
-//                continue;
-//            }
-//
-//            // tuples with the correct colored roots, canonize it and push the inverse
-//            tuple_buckets[color].push_back(Tuple<T, U>(color, tuple->from, tuple->neighbor_color, to_root));
-//            if (tuple->to != to_root ) {
-//                tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
-//                tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, to_root, root.first, tuple->to));
-//            }
-//        }
-//
-//        return unresolved;
-//    };
-//
-//    template<typename T, typename U=Parents::type>
-//    void final_remap(T color, TupleBuckets<T, U>& tuple_buckets, AreaRules<U>& area, RootRules<T, U>& roots) {
-//        Tuples<T, U> bucket;
-//        Tuples<T, U>& tuples = tuple_buckets[color];
-//        bucket.swap(tuples);
-//
-//        for (auto tuple = bucket.rbegin(); tuple != bucket.rend(); ++tuple) {
-//            U area_root = this->canonize(area, tuple->from);
-//            U to_root = this->canonize(area, tuple->to);
-//
-//            // we have an inverse tuple, with an actual root
-//            if (tuple->neighbor_color > tuple->color) {
-//                Tuple<T, U> inverse(tuple->neighbor_color, tuple->to, color, area_root);
-//                tuple_buckets[tuple->neighbor_color].push_back(inverse);
-//                continue;
-//            }
-//
-//            // an area tuple
-//            if (tuple->neighbor_color == tuple->color and tuple->from < tuple->to) {
-//                Tuple<T, U> inverse(tuple->neighbor_color, tuple->to, color, area_root);
-//                tuple_buckets[tuple->neighbor_color].push_back(inverse);
-//                continue;
-//            }
-//
-//            const Root<T, U>& root = roots.find(tuple->from)->second;
-//            // tuples with the correct colored roots, canonize it and push the inverse
-//            if (tuple->to != to_root) {
-//                tuple_buckets[root.first].push_back(Tuple<T, U>(root.first, tuple->to, root.first, to_root));
-//            }
-//
-//            Tuples<T, U>& target_bucket = tuple_buckets[tuple->neighbor_color];
-//            if (tuple->neighbor_color != color) {
-//                target_bucket.push_back(Tuple<T, U>(tuple->neighbor_color, to_root, color, tuple->from));
-//            } else {
-//                tuple->to = to_root;
-//                target_bucket.push_back(*tuple);
-//            }
-//        }
-//    }
+    template<typename T, typename U=Parents::type>
+    void initialize_ends(Endpoints<T, U>& ends, Tuples<T, U>& tuples, RootRules<T, U>& roots) {
+        if (tuples.empty()) return;
+
+        Tuple<T, U>& front = tuples.front();
+        Tuple<T, U>& left = ends.front();
+        left = front;
+
+        Root<T, U>& left_root = roots.find(left.from)->second;
+        left.neighbor_color = left_root.first;
+        left.to = left_root.second;
+
+        Tuple<T, U>& back = tuples.back();
+        Tuple<T, U>& right = ends.back();
+        right = back;
+
+        Root<T, U>& right_root = roots.find(right.from)->second;
+        right.neighbor_color = right_root.first;
+        right.to = right_root.second;
+    };
+
+    template <typename T, typename U=Parents::type>
+    void stitch_ends(Endpoints<T, U>& ends, RootRules<T, U>& roots) {
+        const Tuple<T, U>& left = ends.front();
+        roots[left.from] = Root<T, U>(left.neighbor_color, left.to);
+
+        const Tuple<T, U>& right = ends.back();
+        roots[right.from] = Root<T, U>(right.neighbor_color, right.to);
+    };
+
+    template <typename T, typename U=Parents::type>
+    void remap_root_tuples(T color, TupleBuckets<T, U>& root_buckets, TupleBuckets<T, U>& area_buckets, RootRules<T, U>& roots) {
+        RootRules<T, U> area;
+        Tuples<T, U> remapped;
+        Tuples<T, U>& tuples = root_buckets[color];
+        remapped.swap(tuples);
+
+        Root<T, U> root;
+        U from = std::numeric_limits<U>::max();
+        for (Tuple<T, U>& tuple : remapped) {
+            if (tuple.from != from) {
+                from = tuple.from;
+                root = roots.find(from)->second;
+            }
+
+            // case 1: inverse tuple, put it back to its original bucket
+            if (tuple.neighbor_color > tuple.color) {
+                root_buckets[tuple.neighbor_color].push_back(Tuple<T, U>(tuple.neighbor_color, tuple.to, tuple.color, tuple.from));
+            // case 2: root to high up in the chain
+            } else if (tuple.neighbor_color < root.first) {
+                root_buckets[root.first].push_back(Tuple<T, U>(root.first, root.second, tuple.neighbor_color, tuple.to));
+            // case 3: color of root is correct, but canonical point does not fit, create area tuple
+            } else if (tuple.neighbor_color == root.first and root.second < tuple.to) {
+                auto area_iter = area.find(root.second);
+                U to = (area_iter == area.end() ? tuple.to : std::min(area_iter->second.second, tuple.to));
+                area[root.second] = Root<T, U>(root.first, to);
+            // case 4: invert correct tuple for normalization
+            } else {
+                root_buckets[root.first].push_back(Tuple<T, U>(root.first, root.second, tuple.color, tuple.from));
+            }
+        }
+
+        for (auto& rule : area) {
+            T tuple_color = rule.second.first;
+            U from = rule.first;
+            U to = rule.second.second;
+
+            Tuples<T, U>& area_bucket = area_buckets[tuple_color];
+            area_bucket.push_back(Tuple<T, U>(tuple_color, from, tuple_color, to));
+            area_bucket.push_back(Tuple<T, U>(tuple_color, to, tuple_color, from));
+        }
+    };
 //
 //    template<typename T, typename U=Parents::type>
 //    void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& tuple_buckets, Tuples<T, U>& incoming) {
