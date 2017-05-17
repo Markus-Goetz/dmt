@@ -356,6 +356,18 @@ protected:
         return destination;
     }
 
+    template <typename T, typename U=Parents::type>
+    U canonize(RootRules<T, U>& rules, U origin) {
+        U destination = origin;
+        auto it = rules.find(destination);
+
+        while (it != rules.end() and it->second.second != destination) {
+            destination = it->second.second;
+            it = rules.find(destination);
+        }
+        return destination;
+    };
+
     template<typename T, typename U=Parents::type>
     TupleBuckets<T, U> connect_halos(const Image<T>& image, Parents& parents, size_t global_offset, AreaRules<U>& area, size_t max_color) {
         TupleBuckets<T, U> area_buckets(max_color);
@@ -822,9 +834,11 @@ protected:
                 root_buckets[root.first].push_back(Tuple<T, U>(root.first, root.second, tuple.neighbor_color, tuple.to));
             // case 3: color of root is correct, but canonical point does not fit, create area tuple
             } else if (tuple.neighbor_color == root.first and root.second < tuple.to) {
-                auto area_iter = area.find(tuple.to);
-                U to = (area_iter == area.end()) ? root.second : std::min(area_iter->second.second, root.second);
-                area[tuple.to] = Root<T, U>(root.first, to);
+                U to = std::min(this->canonize(area, tuple.to), root.second);
+                area[tuple.to] = Root<T, U>(tuple.neighbor_color, to);
+                if (root.second > to) {
+                    area[root.second] = Root<T, U>(tuple.neighbor_color, to);
+                }
             // case 4: invert correct tuple for normalization
             } else {
                 root_buckets[root.first].push_back(Tuple<T, U>(root.first, root.second, tuple.color, tuple.from));
