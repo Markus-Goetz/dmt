@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    for (int i = 1; i <= 9; i++) {
+    for (int i = 1; i <= 6; i++) {
         Image<uint8_t> image;
         Image<uint64_t> parent;
         std::vector<hsize_t> total_dimensions;

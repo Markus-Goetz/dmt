@@ -411,14 +411,9 @@ protected:
                 unresolved = this->remap_area_tuples(area_bucket, area);
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_); // globally done?
             }
+
             add_area_tuples_to_roots(root_bucket, area_bucket);
             this->resolve_roots(color, root_buckets, area_buckets);
-//
-//            if (color == 3) {
-//                std::cout << root_buckets << std::endl;
-//                std::cout << area_buckets << std::endl;
-//                std::exit(0);
-//            }
         }
     }
 
@@ -827,9 +822,9 @@ protected:
                 root_buckets[root.first].push_back(Tuple<T, U>(root.first, root.second, tuple.neighbor_color, tuple.to));
             // case 3: color of root is correct, but canonical point does not fit, create area tuple
             } else if (tuple.neighbor_color == root.first and root.second < tuple.to) {
-                auto area_iter = area.find(root.second);
-                U to = (area_iter == area.end() ? tuple.to : std::min(area_iter->second.second, tuple.to));
-                area[root.second] = Root<T, U>(root.first, to);
+                auto area_iter = area.find(tuple.to);
+                U to = (area_iter == area.end()) ? root.second : std::min(area_iter->second.second, root.second);
+                area[tuple.to] = Root<T, U>(root.first, to);
             // case 4: invert correct tuple for normalization
             } else {
                 root_buckets[root.first].push_back(Tuple<T, U>(root.first, root.second, tuple.color, tuple.from));
@@ -850,6 +845,9 @@ protected:
     template<typename T, typename U=Parents::type>
     void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& buckets, Tuples<T, U>& resolved) {
         if (this->size_ == 1) {
+            for (auto& bucket : buckets) {
+                resolved.insert(resolved.end(), bucket.begin(), bucket.end());
+            }
             return;
         }
 
@@ -948,6 +946,9 @@ protected:
             ++nodes;
             std::cout << "Number of nodes: " << nodes << std::endl;
         }
+//
+//        std::cout << resolved_area << std::endl;
+//        std::cout << resolved_roots << std::endl;
     };
 };
 

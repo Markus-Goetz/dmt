@@ -8,7 +8,7 @@ find_package(HDF5 REQUIRED)
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -instrument ${MPI_CXX_COMPILER}")
 
 set(CMAKE_CXX_COMPILER ${MPI_CXX_COMPILER})
-set(CMAKE_BUILD_TYPE DEBUG)
+set(CMAKE_BUILD_TYPE RELWITHDEBUGINFO)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 
@@ -29,5 +29,5 @@ link_directories(${HDF5_LIBRARY_DIRS})
 add_executable(dmt ${SOURCE_FILES})
 target_link_libraries(dmt ${HDF5_LIBRARIES})
 
-#add_executable(tester tester.cpp)
-#target_link_libraries(tester ${HDF5_LIBRARIES})
+add_executable(tester tester.cpp)
+target_link_libraries(tester ${HDF5_LIBRARIES})
