@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    for (int i = 1; i <= 6; i++) {
+    for (int i = 1; i <= 8; i++) {
         Image<uint8_t> image;
         Image<uint64_t> parent;
         std::vector<hsize_t> total_dimensions;
@@ -49,7 +49,6 @@ int main(int argc, char** argv) {
             if (parents[j] != parent[j]) {
                 mismatches[parents[j]] = parent[j];
                 check = true;
-//                std::cout << j << " " << parents[j] << " " << parent[j] << std::endl;
             }
         }
 

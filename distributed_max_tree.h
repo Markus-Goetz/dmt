@@ -834,11 +834,9 @@ protected:
                 root_buckets[root.first].push_back(Tuple<T, U>(root.first, root.second, tuple.neighbor_color, tuple.to));
             // case 3: color of root is correct, but canonical point does not fit, create area tuple
             } else if (tuple.neighbor_color == root.first and root.second < tuple.to) {
-                U to = std::min(this->canonize(area, tuple.to), root.second);
-                area[tuple.to] = Root<T, U>(tuple.neighbor_color, to);
-                if (root.second > to) {
-                    area[root.second] = Root<T, U>(tuple.neighbor_color, to);
-                }
+                auto canonized = std::minmax(this->canonize(area, tuple.to), root.second);
+                area[tuple.to] = Root<T, U>(tuple.neighbor_color, canonized.first);
+                area[canonized.second] = Root<T, U>(tuple.neighbor_color, canonized.first);
             // case 4: invert correct tuple for normalization
             } else {
                 root_buckets[root.first].push_back(Tuple<T, U>(root.first, root.second, tuple.color, tuple.from));
