@@ -127,6 +127,11 @@ protected:
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
 
+            if (this->rank_ == 0) {
+                std::copy(in, in + (*len), out);
+                return;
+            }
+
             for (int i = 0; i < *len; ++i) {
                 auto min_max = std::minmax(in[i], parents[i]);
                 U remote = min_max.first;
@@ -157,8 +162,13 @@ protected:
         auto left_rule_scan = [this, &parents, &area](void* in_, void* out_, int* len, MPI_Datatype*) {
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
-            size_t offset = parents.width() * parents.height() - parents.width();
 
+            if (this->rank_ + 1 == this->size_) {
+                std::copy(in, in + (*len), out);
+                return;
+            }
+
+            size_t offset = parents.width() * parents.height() - parents.width();
             for (int i = 0; i < *len; ++i) {
                 auto min_max = std::minmax(in[i], parents[offset + i]);
                 U remote = min_max.first;
