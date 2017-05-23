@@ -15,7 +15,8 @@ struct MPI_Types;
             return mpi_type; \
         } \
     }
-    
+
+SPECIALIZE_MPI_TYPE(bool,     MPI_C_BOOL);
 SPECIALIZE_MPI_TYPE(uint8_t,  MPI_UNSIGNED_CHAR);
 SPECIALIZE_MPI_TYPE(uint16_t, MPI_UNSIGNED_SHORT);
 SPECIALIZE_MPI_TYPE(uint32_t, MPI_UNSIGNED);

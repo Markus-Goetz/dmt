@@ -2,6 +2,7 @@
 #define DISTRIBUTED_MAX_TREE_H
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -10,6 +11,7 @@
 #include <sstream>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <mpi.h>
@@ -20,14 +22,12 @@
 #include "mpi_wrapper.h"
 #include "util.h"
 
-template <typename T=Parents::type>
-using Bucket = std::vector<T>;
-
-template <typename T=Parents::type>
-using Buckets = std::vector<Bucket<T>>;
-
 template <typename T, typename U=Parents::type>
-using Neighbor = std::tuple<T, U>;
+struct Neighbor {
+    U position;
+    T color;
+    Neighbor(T color_, U position_) : position(position_), color(color_) {}
+};
 
 template <typename T, typename U=Parents::type>
 using Neighbors = std::vector<Neighbor<T, U>>;
@@ -46,7 +46,7 @@ std::ostream& operator<<(std::ostream& os, const TupleBuckets<T, U>& v) {
     std::stringstream ss;
     ss << "[" << std::endl;
     for (const auto& element : v) {
-        if (element.empty()) continue;
+        if (element.second.empty()) continue;
         ss << "\t" << element << std::endl;
     }
     ss << "]";
@@ -77,14 +77,17 @@ public:
         MPI_Comm_split(this->comm_, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
         Tuple<T, U>::create_mpi_type(&this->tuple_type_);
         AreaEndpoint<U>::create_mpi_type(&this->area_endpoint_type_);
-        this->create_right_stitch_op<U>(parents, area);
-        this->create_left_stitch_op<U>(parents, area);
+        this->create_right_stitch_op<T, U>(image, parents, area, offset);
+        this->create_left_stitch_op<T, U>(image, parents, area, offset);
         this->create_area_connect_op<U>();
         this->create_root_find_op<T, U>();
 
+        // local berger algorithm
+        this->compute_local_parents(image, parents);
+
         // distributed resolution
-        TupleBuckets<T, U> root_buckets = this->get_local_tuples(image, parents, offset);
-        TupleBuckets<T, U> area_buckets = this->connect_halos(image, parents, offset, area, root_buckets.size());
+        TupleBuckets<T, U> root_buckets = this->get_halo_roots(image, parents, offset);
+        TupleBuckets<T, U> area_buckets = this->connect_halos(image, parents, offset, area);
         this->resolve_tuples(area_buckets, root_buckets);
 
         // send tuples to owners and apply
@@ -92,7 +95,7 @@ public:
         Tuples<T, U> resolved_roots;
         this->redistribute_tuples(image, area_buckets, resolved_area);
         this->redistribute_tuples(image, root_buckets, resolved_roots);
-        this->generate_parent_image(parents, resolved_area, resolved_roots, offset);
+        this->generate_parent_image(image, parents, resolved_area, resolved_roots, area, offset);
 
         // MPI clean up
         MPI_Op_free(&this->area_connect_);
@@ -121,33 +124,35 @@ protected:
     int rank_;
     int size_;
 
-    template<typename U=Parents::type>
-    void create_right_stitch_op(const Parents& parents, AreaRules<U>& area) {
-        auto right_rule_scan = [this, &parents, &area](void* in_, void* out_, int* len, MPI_Datatype*) {
+    template<typename T, typename U=Parents::type>
+    void create_right_stitch_op(const Image<T>& image, Parents& parents, AreaRules<U>& area, size_t offset) {
+        auto right_rule_scan = [this, &image, &parents, &area, offset](void* in_, void* out_, int* len, MPI_Datatype*) {
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
 
+            // early our for the left most image
             if (this->rank_ == 0) {
                 std::copy(in, in + (*len), out);
                 return;
             }
 
+            // other image parts need to chain up
             for (int i = 0; i < *len; ++i) {
-                auto min_max = std::minmax(in[i], parents[i]);
-                U remote = min_max.first;
-                U local = min_max.second;
-                auto it = area.find(local);
+                U local = (image[i] == image[parents[i]] ? parents[i] : i) + offset;
+                auto min_max = std::minmax(in[i], local);
+                auto it = area.find(min_max.first);
 
-                if (it != area.end() and it->second != remote) {
-                    area[local] = std::min(this->canonize(area, remote), this->canonize(area, it->second));
-                } else if (local != remote) {
-                    area[local] = remote;
+                if (it != area.end() and it->second != min_max.first) {
+                    area[min_max.second] = std::min(this->canonize(area, min_max.first), this->canonize(area, it->second));
+                } else if (min_max.second != min_max.first) {
+                    area[min_max.second] = min_max.first;
                 }
             }
 
-            size_t offset = parents.width() * parents.height() - parents.width();
+            // canonize the lower image halo and send further
+            size_t canonization_offset = parents.width() * parents.height() - parents.width();
             for (int i = 0; i < *len; ++i) {
-                out[i] = this->canonize(area, parents[offset + i]);
+                out[i] = this->canonize(area, parents[canonization_offset + i]);
             }
         };
         static auto static_right_scan = right_rule_scan;
@@ -157,30 +162,30 @@ protected:
         }, false, &this->right_stitch_);
     }
 
-    template<typename U=Parents::type>
-    void create_left_stitch_op(const Parents& parents, AreaRules<U>& area) {
-        auto left_rule_scan = [this, &parents, &area](void* in_, void* out_, int* len, MPI_Datatype*) {
+    template<typename T, typename U=Parents::type>
+    void create_left_stitch_op(const Image<T>& image, Parents& parents, AreaRules<U>& area, size_t offset) {
+        auto left_rule_scan = [this, &image, &parents, &area, offset](void* in_, void* out_, int* len, MPI_Datatype*) {
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
 
+            // early out for the right most image
             if (this->rank_ + 1 == this->size_) {
                 std::copy(in, in + (*len), out);
                 return;
             }
 
-            size_t offset = parents.width() * parents.height() - parents.width();
-            for (int i = 0; i < *len; ++i) {
-                auto min_max = std::minmax(in[i], parents[offset + i]);
-                U remote = min_max.first;
-                U local = min_max.second;
-
-                if (local != remote) {
-                    area[local] = remote;
+            // other image parts need to merge
+            size_t start = parents.width() * parents.height() - parents.width();
+            for (size_t i = start, j = 0; i < start + (*len); ++i, ++j) {
+                U local = (image[i] == image[parents[i]] ? parents[i] : i) + offset;
+                auto min_max = std::minmax(in[j], local);
+                if (min_max.first != min_max.second) {
+                    area[min_max.second] = min_max.first;
                 }
             }
 
             for (int i = 0; i < *len; ++i) {
-                out[i] = this->canonize(area, parents[i]);
+                out[i] = this->canonize(area, parents[i] + offset);
             }
         };
         static auto static_left_scan = left_rule_scan;
@@ -278,80 +283,105 @@ protected:
     }
 
     template<typename U=Parents::type>
-    U find_root(const Parents& parents, U position, size_t offset) {
-        U parent = parents[position];
-        if (parent == position + offset) {
-            return parent;
+    U find_root(Parents& parents, U position) {
+        U at = position;
+        while (parents[at] != at) {
+            at = parents[at];
         }
-        return find_root(parents, parent - offset, offset);
+
+        // path compression
+        U next_element;
+        U next = position;
+        while (next != parents[at]) {
+            next_element = parents[next];
+            parents[next] = parents[at];
+            next = next_element;
+        }
+
+        return parents[at];
     }
 
-    template<typename T, typename U=Parents::type>
-    TupleBuckets<T, U> get_local_tuples(const Image<T>& image, Parents& parents, size_t offset) {
-        // bucket sort image
-        T max_color = 0;
-        Buckets<U> buckets;
-        for (size_t i = 0; i < image.size(); ++i) {
-            T color = image[i];
-            buckets.resize(std::max(static_cast<size_t>(color + 1), buckets.size()));
-            buckets[color].push_back(i);
-            max_color = std::max(color, max_color);
+    template <typename T, typename U=Parents::type>
+    void compute_local_parents(const Image<T>& image, Parents& parents) {
+        std::vector<Root<T, U> > pixels;
+        pixels.reserve(image.size());
+        Parents zpar = parents;
+
+        // calculate the berger max-tree
+        for (U i = 0; i < image.size(); ++i) {
+            pixels.push_back(Root<T, U>(image[i], i));
         }
+        std::sort(pixels.begin(), pixels.end());
 
-        // get global max channel
-        MPI_Allreduce(MPI_IN_PLACE, &max_color, 1, MPI_Types<T>::map(), MPI_MAX, this->comm_);
-        buckets.resize(max_color + 1);
-        TupleBuckets<T, U> root_buckets(max_color + 1);
+        for (auto it = pixels.crbegin(); it != pixels.crend(); ++it) {
+            T pixel_color = it->first;
+            U position = it->second;
 
-        // connected component labeling
-        std::map<U, std::set<U> > outbound;
-        T color = static_cast<T>(buckets.size() - 1);
-        for (auto bucket = buckets.crbegin(); bucket != buckets.crend(); ++bucket) {
-            // weakly connect the sorted pixels to flat zones per gray-value
-            for (auto index = bucket->crbegin(); index != bucket->crend(); ++index) {
-                parents[*index] = *index + offset;
-                Neighbors<T> neighbors = lower_neighbors(image, *index);
-                for (auto neighbor : neighbors) {
-                    T neighbor_color = std::get<0>(neighbor);
-                    U neighbor_position = std::get<1>(neighbor);
+            parents[position] = position;
+            zpar[position] = position;
 
-                    if (neighbor_color != color) continue;
-                    U root = find_root(parents, neighbor_position, offset);
-                    parents[root - offset] = *index + offset;
+            Neighbors<T, U> neighbors = this->all_neighbors(image, position);
+            for (auto& neighbor : neighbors) {
+                T neighbor_color = neighbor.color;
+                U neighbor_position = neighbor.position;
+                if (neighbor_color < pixel_color or (neighbor_color == pixel_color and neighbor_position < position)) continue;
+
+                U root = this->find_root(zpar, neighbor_position);
+                parents[root] = position;
+                if (root != position) {
+                    parents[root] = position;
+                    zpar[root] = position;
                 }
             }
-
-            // strongly connect zones and generate tuples
-            outbound.clear();
-            for (auto index = bucket->cbegin(); index != bucket->cend(); ++index) {
-                U root = find_root(parents, *index, offset);
-                parents[*index] = root;
-
-                Neighbors<T> neighbors = all_neighbors(image, *index);
-                for (auto neighbor : neighbors) {
-                    // skip lower color bands
-                    T neighbor_color = std::get<0>(neighbor);
-                    if (neighbor_color <= color) continue;
-
-                    // get the root of the neighbor
-                    std::set<U>& out = outbound[root];
-                    U neighbor_position = std::get<1>(neighbor);
-                    U neighbor_root = find_root(parents, neighbor_position, offset);
-
-                    // generate connection tuples to already canonized zones
-                    if (out.find(neighbor_root) == out.end()) {
-                        out.insert(neighbor_root);
-                        Tuples<T, U>& bucket = root_buckets[neighbor_color];
-                        bucket.push_back(Tuple<T, U>(neighbor_color, neighbor_root, color, root));
-                    }
-                }
-            }
-
-            // advance to the next color channel
-            --color;
         }
 
-        return root_buckets;
+        // berger canonization
+        for (const auto& pixel : pixels) {
+            U position = pixel.second;
+            U parent = parents[position];
+            U parent_parent = parents[parent];
+
+            if (image[parent_parent] == image[parent]) {
+                parents[position] = parent_parent;
+            }
+        }
+    };
+
+    template <typename T, typename U=Parents::type>
+    TupleBuckets<T, U> get_halo_roots(const Image<T>& image, const Parents& parents, size_t offset) {
+        TupleBuckets<T, U> roots;
+        std::unordered_set<U> seen;
+
+        if (this->rank_ > 0) {
+            this->get_one_sided_halo_roots(image, parents, roots, 0, seen, offset);
+        }
+        if (this->rank_ + 1 < this->size_) {
+            this->get_one_sided_halo_roots(image, parents, roots, image.size() - image.width(), seen, offset);
+        }
+
+        return roots;
+    };
+
+    template <typename T, typename U=Parents::type>
+    void get_one_sided_halo_roots(const Image<T>& image, const Parents& parents, TupleBuckets<T, U>& roots, size_t start, std::unordered_set<U>& seen, size_t offset) {
+        for (size_t i = start; i != start + image.width(); ++i) {
+            U location = (image[i] == image[parents[i]] ? parents[i] : i);
+            U parent = parents[location];
+
+            while (seen.find(location) == seen.end() and location != parent) {
+                T first_color = image[location];
+                T second_color = image[parent];
+                roots[first_color].push_back(Tuple<T, U>(first_color, location + offset, second_color, parent + offset));
+
+                seen.insert(location);
+                location = parent;
+                parent = parents[location];
+            }
+        }
+    };
+
+    void add_offset(Parents& parents, size_t offset) {
+        for (auto& pixel : parents) pixel += offset;
     }
 
     template<typename U=Parents::type>
@@ -379,22 +409,27 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    TupleBuckets<T, U> connect_halos(const Image<T>& image, Parents& parents, size_t global_offset, AreaRules<U>& area, size_t max_color) {
-        TupleBuckets<T, U> area_buckets(max_color);
+    TupleBuckets<T, U> connect_halos(const Image<T>& image, Parents& parents, size_t global_offset, AreaRules<U>& area) {
+        TupleBuckets<T, U> area_buckets;
         if (this->size_ == 1) return area_buckets;
 
         size_t width = parents.width();
+        size_t offset = parents.size() - width;
         std::vector<U> send_buffer(width);
         std::vector<U> recv_buffer(width);
-        size_t offset = width * parents.height() - width;
 
         // right directed communication of minimum
-        U* read = parents.data() + (this->rank_ != 0 ? 0 : offset);
-        MPI_Scan(read, recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
+        size_t start = (this->rank_ != 0 ? 0 : offset);
+        for (size_t i = start, j = 0; i < start + width; ++i, ++j) {
+            send_buffer[j] = (image[i] == image[parents[i]] ? parents[i] : i) + global_offset;
+        }
+        MPI_Scan(send_buffer.data(), recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
 
         // left directed, backwards propagation of right minimum scan results
-        for (size_t i = 0; i < width; ++i) {
-            send_buffer[i] = this->canonize(area, parents[i + (this->rank_ + 1 == this->size_ ? 0 : offset)]);
+        start = (this->rank_ + 1 == this->size_ ? 0 : offset);
+        for (size_t i = start, j = 0; i < start + width; ++i, ++j) {
+            U parent = (image[i] == image[parents[i]] ? parents[i] : i) + global_offset;
+            send_buffer[j] = this->canonize(area, parent);
         }
         MPI_Scan(send_buffer.data(), recv_buffer.data(), width,
                  MPI_Types<U>::map(), this->left_stitch_, this->reverse_comm_);
@@ -410,22 +445,25 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void resolve_tuples(TupleBuckets<T, U>& area_buckets, TupleBuckets<T, U>& root_buckets) {
-        const size_t max_color = area_buckets.size() - 1;
-        for (size_t i = max_color; i != std::numeric_limits<size_t>::max(); --i) {
+        if (this->size_ == 1) return;
+        auto it = root_buckets.rbegin();
+
+        while (true) {
+            // check whether main loop is done
+            bool all_done = (it == root_buckets.rend());
+            MPI_Allreduce(MPI_IN_PLACE, &all_done, 1, MPI_C_BOOL, MPI_LAND, this->comm_);
+            if (all_done) break;
+
             // retrieve the current bucket
-            const T color = static_cast<T>(i);
+            T color = (it != root_buckets.rend() ? it->first : std::numeric_limits<T>::lowest());
+            MPI_Allreduce(MPI_IN_PLACE, &color, 1, MPI_Types<T>::map(), MPI_MAX, this->comm_);
+            if (it != root_buckets.rend() and color == it->first) ++it;
+
+            // resolve the area chain
+            bool unresolved= true;
             Tuples<T, U>& area_bucket = area_buckets[color];
             Tuples<T, U>& root_bucket = root_buckets[color];
 
-            // check whether there are tuples in this channel at all, if none are available, skip the channel
-            size_t total = area_bucket.size() + root_bucket.size();
-            MPI_Allreduce(MPI_IN_PLACE, &total, 1, MPI_Types<decltype(total)>::map(), MPI_SUM, this->comm_);
-            if (total == 0) {
-                continue;
-            }
-
-            // resolve the tuple chains
-            bool unresolved= true;
             while (unresolved) {
                 AreaRules<U> area;
                 this->sample_sort(area_bucket);
@@ -434,6 +472,7 @@ protected:
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_); // globally done?
             }
 
+            // resolve the roots
             add_area_tuples_to_roots(root_bucket, area_bucket);
             this->resolve_roots(color, root_buckets, area_buckets);
         }
@@ -871,7 +910,8 @@ protected:
     void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& buckets, Tuples<T, U>& resolved) {
         if (this->size_ == 1) {
             for (auto& bucket : buckets) {
-                resolved.insert(resolved.end(), bucket.begin(), bucket.end());
+                resolved.insert(resolved.end(), bucket.second.begin(), bucket.second.end());
+                bucket.second.clear();
             }
             return;
         }
@@ -881,23 +921,27 @@ protected:
         MPI_Allreduce(MPI_IN_PLACE, &total_height, 1, MPI_Types<decltype(total_height)>::map(), MPI_SUM, this->comm_);
 
         // chunk up the image to determine tuple target ranks
-        size_t width = image.width();
-        U total_tuples = 0;
-        U chunk = total_height / this->size_ * width;
+        U chunk = total_height / this->size_ * image.width();
         U remainder = total_height % this->size_;
+        U total_tuples = 0;
 
         // calculate which tuple goes where
         std::vector<int> send_counts(static_cast<size_t>(this->size_), 0);
         std::vector<int> recv_counts(static_cast<size_t>(this->size_), 0);
-        for (const auto& bucket : buckets) {
+        for (const auto& b : buckets) {
+            auto& bucket = b.second;
             for (const auto& tuple : bucket) {
                 U target_rank = tuple.from / chunk;
-                while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
-                    if (target_rank == 0) break;
+                while (target_rank != 0 and target_rank * chunk + std::min(target_rank, remainder) * image.width() > tuple.from) {
                     --target_rank;
                 }
                 ++send_counts[target_rank];
                 ++total_tuples;
+
+                if (target_rank > 0 and target_rank * chunk + (std::min(target_rank, remainder) + 1) * image.width() > tuple.from) {
+                    ++send_counts[target_rank - 1];
+                    ++total_tuples;
+                }
             }
         }
         // exchange the histogram with the other ranks
@@ -917,16 +961,22 @@ protected:
         resolved.resize(total_received_tuples);
         std::vector<int> placement = send_displs;
 
-        for (auto& bucket : buckets) {
-            for (auto& tuple : bucket) {
+        for (auto& b : buckets) {
+            auto& bucket = b.second;
+            for (const auto& tuple : bucket) {
                 U target_rank = tuple.from / chunk;
-                while (target_rank * chunk + std::min(target_rank, remainder) * width > tuple.from) {
-                    if (target_rank == 0) break;
+                while (target_rank != 0 and target_rank * chunk + std::min(target_rank, remainder) * image.width() > tuple.from) {
                     --target_rank;
                 }
                 int& position = placement[target_rank];
                 outgoing[position] = tuple;
                 ++position;
+
+                if (target_rank > 0 and target_rank * chunk + (std::min(target_rank, remainder) + 1) * image.width() > tuple.from) {
+                    int& position = placement[target_rank - 1];
+                    outgoing[position] = tuple;
+                    ++position;
+                }
             }
             bucket.clear();
         }
@@ -936,40 +986,38 @@ protected:
     };
 
     template<typename T, typename U=Parents::type>
-    void generate_parent_image(Parents& parents, Tuples<T, U>& resolved_area, Tuples<T, U>& resolved_roots, size_t offset) {
-        // parse the area tuples and memorize area rules
-        AreaRules<U> area;
+    void generate_parent_image(const Image<T>& image, Parents& parents, Tuples<T, U>& resolved_area, Tuples<T, U>& resolved_roots, AreaRules<U>& area, size_t offset) {
+        area.clear();
         for (const auto& tuple : resolved_area) {
             area[tuple.from] = tuple.to;
         }
 
         // normalize the halo zone and communicate it to the neighbor nodes
         size_t width = parents.width();
-        size_t total_pixels = width * parents.height();
-        size_t halo_offset = total_pixels - width;
+        size_t halo_offset = image.size() - width;
+        std::vector<U> send_buffer(width);
         std::vector<U> buffer(width);
 
-        for (size_t i = halo_offset; i < total_pixels; ++i) {
-            parents[i] = this->canonize(area, parents[i]);
+        for (size_t i = halo_offset, j = 0; i < image.size(); ++i, ++j) {
+            U local = (image[i] == image[parents[i]] ? parents[i] : i) + offset;
+            send_buffer[j] = this->canonize(area, local);
         }
-        MPI_Scan(parents.data() + halo_offset, buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
+        MPI_Scan(send_buffer.data(), buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
 
         // canonize the flat areas
         for (auto& pixel : parents) {
+            pixel += offset;
             pixel = this->canonize(area, pixel);
+        }
+
+        // canonize the former area roots
+        for (auto& rule : area) {
+            parents[rule.first - offset] = rule.second;
         }
 
         // and finally set the roots
         for (const auto& root : resolved_roots) {
             parents[root.from - offset] = root.to;
-        }
-
-        // compute the number of nodes
-        U nodes = resolved_roots.size();
-        MPI_Reduce(this->rank_ == 0 ? MPI_IN_PLACE : &nodes, &nodes, 1, MPI_Types<U>::map(), MPI_SUM, 0, this->comm_);
-        if (this->rank_ == 0) {
-            ++nodes;
-            std::cout << "Number of nodes: " << nodes << std::endl;
         }
     };
 };

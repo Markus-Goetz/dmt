@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <tuple>
 #include <vector>
@@ -85,6 +86,6 @@ template<typename T, typename U=Parents::type>
 using Tuples = std::vector<Tuple<T, U> >;
 
 template<typename T, typename U=Parents::type>
-using TupleBuckets = std::vector<Tuples<T, U> >;
+using TupleBuckets = std::map<T, Tuples<T, U> >;
 
 #endif // TUPLE_H
