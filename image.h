@@ -93,6 +93,14 @@ public:
         return this->pixels_.cend();
     }
 
+    inline typename std::vector<T>::const_reverse_iterator crbegin() const noexcept {
+        return this->pixels_.crbegin();
+    }
+
+    inline typename std::vector<T>::const_reverse_iterator crend() const noexcept {
+        return this->pixels_.crend();
+    }
+
     friend std::ostream& operator<<(std::ostream& os, const Image& image) {
         if (image.size() == 0) {
             std::cout << std::endl;
