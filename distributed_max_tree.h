@@ -1,17 +1,12 @@
 #ifndef DISTRIBUTED_MAX_TREE_H
 #define DISTRIBUTED_MAX_TREE_H
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <iostream>
-#include <queue>
-#include <set>
 #include <sstream>
-#include <stack>
-#include <tuple>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -20,8 +15,8 @@
 
 #include "endpoints.h"
 #include "image.h"
-#include "tuple.h"
 #include "mpi_wrapper.h"
+#include "tuple.h"
 #include "util.h"
 
 template <typename T, typename U=Parents::type>
@@ -44,9 +39,6 @@ template <typename T, typename U=Parents::type>
 using RootRules = std::unordered_map<U, Root<T, U>>;
 
 template <typename T, typename U=Parents::type>
-using Queue = std::map<T, std::priority_queue<U, std::vector<U>, std::greater<U>>>;
-
-template <typename T, typename U=Parents::type>
 std::ostream& operator<<(std::ostream& os, const TupleBuckets<T, U>& v) {
     std::stringstream ss;
     ss << "[" << std::endl;
@@ -58,25 +50,6 @@ std::ostream& operator<<(std::ostream& os, const TupleBuckets<T, U>& v) {
 
     return os << ss.str();
 }
-
-template <typename T, typename U=Parents::type>
-const U& top(const Queue<T, U>& queue) {
-    return queue.crbegin()->second.top();
-};
-
-template <typename T, typename U=Parents::type>
-void pop(Queue<T, U>& queue) {
-    auto it = queue.rbegin();
-    it->second.pop();
-    if (it->second.empty()) {
-        queue.erase(it->first);
-    }
-};
-
-template <typename T, typename U=Parents::type>
-void push(Queue<T, U>& queue, T color, U pixel) {
-    queue[color].push(pixel);
-};
 
 class DistributedMaxTree {
 public:
@@ -106,7 +79,8 @@ public:
 //        this->create_root_find_op<T, U>();
 //
 //        // local berger algorithm
-        this->compute_salembier_parents(image, parents, 0, 0);
+        this->compute_salembier(image, parents, 1);
+//        this->compute_salembier_chunk(image, parents, 0, 0);
 //
 //        // distributed resolution
 //        TupleBuckets<T, U> root_buckets = this->get_halo_roots(image, parents, offset);
@@ -230,37 +204,48 @@ protected:
     }
 
     template<typename T, typename U=Parents::type>
-    Neighbors<T> lower_neighbors(const Image<T>& image, U position) {
+    inline Neighbors<T> lower_neighbors(const Image<T>& image, U position) {
+        return this->lower_neighbors(image, position, image.size());
+    }
+
+    template<typename T, typename U=Parents::type>
+    inline Neighbors<T> lower_neighbors(const Image<T>& image, U position, U end) {
         Neighbors<T, U> neighbors;
 
-        // right
-        if ((position + 1) % image.width() != 0) {
-            size_t right = position + 1;
-            neighbors.push_back(Neighbor<T>(image[right], right));
-        }
-
         // down
-        if (position + image.width() < image.size()) {
+        if (position + image.width() < end) {
             size_t down = position + image.width();
             neighbors.push_back(Neighbor<T>(image[down], down));
+        }
+
+        // right
+        if ((position + 1) % image.width() != 0 and position + 1 < end) {
+            size_t right = position + 1;
+            neighbors.push_back(Neighbor<T>(image[right], right));
         }
 
         return neighbors;
     }
 
     template<typename T, typename U=Parents::type>
-    Neighbors<T, U> all_neighbors(const Image<T>& image, size_t position) {
-        Neighbors<T> neighbors = lower_neighbors(image, position);
+    inline Neighbors<T, U> all_neighbors(const Image<T>& image, U position) {
+        return this->all_neighbors(image, position, 0, image.size());
+    }
 
-        // top
-        if (position >= image.width()) {
-            size_t top = position - image.width();
-            neighbors.push_back(Neighbor<T, U>(image[top], top));
-        }
+    template<typename T, typename U=Parents::type>
+    Neighbors<T, U> all_neighbors(const Image<T>& image, U position, U start, U end) {
+        Neighbors<T> neighbors = lower_neighbors(image, position, end);
+
         // left
-        if (position % image.width() != 0) {
+        if (position % image.width() != 0 and position > start) {
             size_t left = position - 1;
             neighbors.push_back(Neighbor<T, U>(image[left], left));
+        }
+
+        // top
+        if (position >= start + image.width()) {
+            size_t top = position - image.width();
+            neighbors.push_back(Neighbor<T, U>(image[top], top));
         }
 
         return neighbors;
@@ -286,57 +271,155 @@ protected:
     }
 
     template <typename T, typename U=Parents::type>
-    void compute_salembier_parents(const Image<T>& image, Parents& parents, size_t, size_t) {
-        std::stack<U> stack;
-        Queue<T, U> queue;
-        Image<uint8_t> deja_vu(0, image.width(), image.height());
+    void compute_salembier(const Image<T>& image, Parents& parents, unsigned int thread_count=std::thread::hardware_concurrency()) {
+        std::vector<std::thread> threads;
+        threads.reserve(thread_count);
 
-        U min_point = 0;
-        stack.push(min_point);
-        push<T, U>(queue, image[min_point], min_point);
-        deja_vu[min_point] = true;
+        U chunk = image.size() / thread_count;
+        U remainder = image.size() % thread_count;
 
-        while (!queue.empty()) {
+        for (size_t t = 0; t < thread_count; ++t) {
+            size_t start = t * chunk + std::min(t, remainder);
+            size_t end = (t + 1) * chunk + std::min(t + 1, remainder);
+            auto function = &DistributedMaxTree::compute_salembier_chunk<T, U>;
+
+            threads.push_back(std::thread(function, this, std::ref(image), std::ref(parents), start, end));
+        }
+
+        for (unsigned int t = 0; t < thread_count; ++t) {
+            threads[t].join();
+        }
+    };
+
+    template <typename T, typename U=Parents::type>
+    void compute_salembier_chunk(const Image<T>& image, Parents& parents, U start, U end) {
+        std::vector<T> merge_color;
+        std::vector<U> children;
+        std::map<T, std::vector<U> > stacks;
+        std::unordered_map<T, std::vector<U> > pixels;
+        Image<uint8_t> deja_vu(0, image.width(), (end - start) / image.width() + 1);
+
+        T start_color = image[start];
+        stacks[start_color].push_back(start);
+        pixels[start_color].push_back(start);
+        deja_vu[start] = 1;
+
+        while (!stacks.empty()) {
             flood:
-            U pixel = top(queue);
-            U representative = stack.top();
+            auto it = stacks.rbegin();
+            T color = it->first;
+            auto& bucket = it->second;
+            U pixel = bucket.back();
+            bucket.pop_back();
 
-            Neighbors<T, U> neighbors = this->all_neighbors(image, pixel);
-            for (auto neighbor : neighbors) {
-                uint8_t& is_processed = deja_vu[neighbor.position];
-                // if we visited this pixel already proceed
+            Neighbors<T, U> neighbors = this->all_neighbors(image, pixel, start, end);
+            for (const auto& neighbor : neighbors) {
+                uint8_t& is_processed = deja_vu[neighbor.position - start];
                 if (is_processed) continue;
-
-                // actually work on the pixel
                 is_processed = 1;
-                push(queue, neighbor.color, neighbor.position);
 
-                if (image[pixel] < neighbor.color) {
-                    stack.push(neighbor.position);
+                pixels[neighbor.color].push_back(neighbor.position);
+                stacks[neighbor.color].push_back(neighbor.position);
+
+                if (color < neighbor.color) {
+                    stacks[color].push_back(pixel);
                     goto flood;
                 }
             }
 
-            // p done
-            pop(queue);
-            parents[pixel] = representative;
+            if (bucket.empty()) {
+                auto& pixel_bucket = pixels[color];
 
-            if (queue.empty()) break;
-            U next = top(queue);
-            if (image[next] < image[representative]) {
-                //size_type par;
-                stack.pop();
-                while (!stack.empty() and image[next] < image[stack.top()]) {
-                    representative = (parents[representative] = stack.top());
-                    stack.pop();
+                // determine canonical point
+                std::sort(pixel_bucket.begin(), pixel_bucket.end());
+                const U canonical = pixel_bucket.front();
+
+                // canonize flooded area
+                for (auto& pixel : pixel_bucket) {
+                    parents[pixel] = canonical;
                 }
-                if (stack.empty() or image[stack.top()] < image[next]) {
-                    stack.push(next);
+
+                // remove the bucket
+                pixels.erase(color);
+                stacks.erase(color);
+
+                // merge children if present
+                T priority_color = !stacks.empty() ? stacks.rbegin()->first : color;
+                while (!children.empty() and merge_color.back() > priority_color) {
+                    parents[children.back()] = canonical;
+                    children.pop_back();
+                    merge_color.pop_back();
                 }
-                parents[representative] = stack.top();
+
+                // add this area as child
+                children.push_back(canonical);
+                merge_color.push_back(priority_color);
             }
         }
+
+        if (!children.empty()) {
+            U root = children.back();
+            for (auto& child : children) parents[child] = root;
+        }
     };
+
+
+
+//        std::stack<U> stack;
+//        Queue<T, U> queue;
+//        Image<uint8_t> deja_vu(0, image.width(), (end - start) / image.width() + 1);
+//
+//        // initialize stacks
+//        stack.push(start);
+//        push<T, U>(queue, image[start], start);
+//        deja_vu[start] = 1;
+//
+//        // start the actual flooding
+//        while (!queue.empty()) {
+//            flood:
+//            U pixel = top(queue);
+//            U representative = stack.top();
+//
+//            Neighbors<T, U> neighbors = this->all_neighbors(image, pixel, start, end);
+//            for (auto neighbor : neighbors) {
+//                uint8_t& is_processed = deja_vu[neighbor.position - start];
+//                // if we visited this pixel already proceed
+//                if (is_processed) continue;
+//
+//                // actually work on the pixel
+//                is_processed = 1;
+//                push(queue, neighbor.color, neighbor.position);
+//
+//                if (image[pixel] < neighbor.color) {
+//                    stack.push(neighbor.position);
+//                    goto flood;
+//                }
+//            }
+//
+//            // current point is done, fix the representative
+//            if (top(queue) != pixel) {
+//                stack.pop();
+//                stack.push(top(queue));
+//                continue;
+//            }
+//            pop(queue);
+//            parents[pixel] = representative;
+//
+//            if (queue.empty()) break;
+//            U next = top(queue);
+//            if (image[next] < image[representative]) {
+//                stack.pop();
+//
+//                while (!stack.empty() and image[next] < image[stack.top()]) {
+//                    representative = (parents[representative] = stack.top());
+//                    stack.pop();
+//                }
+//                if (stack.empty() or image[stack.top()] < image[next]) {
+//                    stack.push(next);
+//                }
+//                parents[representative] = stack.top();
+//            }
+//        }
 
     template <typename T, typename U=Parents::type>
     void compute_local_parents(const Image<T>& image, Parents& parents) {
