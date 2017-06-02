@@ -78,9 +78,8 @@ public:
 //        this->create_area_connect_op<U>();
 //        this->create_root_find_op<T, U>();
 //
-//        // local berger algorithm
-        this->compute_salembier(image, parents, 1);
-//        this->compute_salembier_chunk(image, parents, 0, 0);
+//        // local max tree computation
+        this->compute_salembier(image, parents, 2);
 //
 //        // distributed resolution
 //        TupleBuckets<T, U> root_buckets = this->get_halo_roots(image, parents, offset);
@@ -128,7 +127,6 @@ protected:
 
             std::vector<size_t> a(in, in + *len);
             std::vector<size_t> b(out, out + *len);
-            std::cout << a << " " << b << std::endl;
             return;
 
             AreaRules<U> area;
@@ -204,11 +202,6 @@ protected:
     }
 
     template<typename T, typename U=Parents::type>
-    inline Neighbors<T> lower_neighbors(const Image<T>& image, U position) {
-        return this->lower_neighbors(image, position, image.size());
-    }
-
-    template<typename T, typename U=Parents::type>
     inline Neighbors<T> lower_neighbors(const Image<T>& image, U position, U end) {
         Neighbors<T, U> neighbors;
 
@@ -225,11 +218,6 @@ protected:
         }
 
         return neighbors;
-    }
-
-    template<typename T, typename U=Parents::type>
-    inline Neighbors<T, U> all_neighbors(const Image<T>& image, U position) {
-        return this->all_neighbors(image, position, 0, image.size());
     }
 
     template<typename T, typename U=Parents::type>
@@ -251,44 +239,68 @@ protected:
         return neighbors;
     }
 
-    template<typename U=Parents::type>
-    U find_root(Parents& parents, U position) {
-        U at = position;
-        while (parents[at] != at) {
-            at = parents[at];
-        }
-
-        // path compression
-        U next_element;
-        U next = position;
-        while (next != parents[at]) {
-            next_element = parents[next];
-            parents[next] = parents[at];
-            next = next_element;
-        }
-
-        return parents[at];
-    }
-
     template <typename T, typename U=Parents::type>
     void compute_salembier(const Image<T>& image, Parents& parents, unsigned int thread_count=std::thread::hardware_concurrency()) {
-        std::vector<std::thread> threads;
-        threads.reserve(thread_count);
+        // early out
+        if (thread_count <= 1) return;
+        std::cout << image << std::endl << std::endl;
+
+        // allocate resources
+        thread_count = std::min(thread_count, static_cast<unsigned int>(image.height()));
+        std::vector<std::thread> threads(thread_count);
+        std::vector<AreaRules<U>> area_rules(thread_count);
 
         U chunk = image.size() / thread_count;
         U remainder = image.size() % thread_count;
 
+        // processing loop
         for (size_t t = 0; t < thread_count; ++t) {
-            size_t start = t * chunk + std::min(t, remainder);
-            size_t end = (t + 1) * chunk + std::min(t + 1, remainder);
+            U start = t * chunk + std::min(t, remainder);
+            U end = (t + 1) * chunk + std::min(t + 1, remainder);
             auto function = &DistributedMaxTree::compute_salembier_chunk<T, U>;
-
-            threads.push_back(std::thread(function, this, std::ref(image), std::ref(parents), start, end));
+            threads[t] = std::thread(function, this, std::ref(image), std::ref(parents), start, end);
         }
 
         for (unsigned int t = 0; t < thread_count; ++t) {
             threads[t].join();
         }
+
+        // merge loop
+        size_t steps = static_cast<size_t>(std::ceil(std::log2(thread_count)));
+        for (size_t s = 0; s < steps; ++s) {
+            size_t offset = static_cast<size_t>(std::pow(2.0, s));
+            size_t skip = offset * 2;
+
+            // spawn merging threads
+            for (size_t t = 0; t < thread_count; t += skip) {
+                U merge_point = t + offset;
+                U start = merge_point * chunk + std::min(merge_point, remainder);
+                if (start >= image.size()) continue;
+
+                auto function = &DistributedMaxTree::merge_parents<T, U>;
+                threads[t] = std::thread(function, this, std::ref(image), std::ref(parents),
+                                         start, std::ref(area_rules[t]), std::ref(area_rules[merge_point]));
+            }
+
+            // barrier
+            for (size_t t = 0; t < thread_count; t += skip) {
+                if (threads[t].joinable()) threads[t].join();
+            }
+        }
+
+        // apply the rules
+        for (size_t t = 0; t < thread_count; ++t) {
+            U start = t * chunk + std::min(t, remainder);
+            U end = (t + 1) * chunk + std::min(t + 1, remainder);
+            auto function = &DistributedMaxTree::apply_rules<U>;
+            threads[t] = std::thread(function, this, std::ref(parents), std::ref(area_rules.front()), start, end);
+        }
+
+        for (size_t t = 0; t < thread_count; ++t) {
+            threads[t].join();
+        }
+
+        std::cout << parents << std::endl;
     };
 
     template <typename T, typename U=Parents::type>
@@ -318,15 +330,18 @@ protected:
                 if (is_processed) continue;
                 is_processed = 1;
 
+                // add neighbors to queue
                 pixels[neighbor.color].push_back(neighbor.position);
                 stacks[neighbor.color].push_back(neighbor.position);
 
+                // neighbor color is larger, descend first in depth-first-fashion
                 if (color < neighbor.color) {
                     stacks[color].push_back(pixel);
                     goto flood;
                 }
             }
 
+            // the stack is empty, the current flat zone is found
             if (bucket.empty()) {
                 auto& pixel_bucket = pixels[color];
 
@@ -341,7 +356,7 @@ protected:
 
                 // remove the bucket
                 pixels.erase(color);
-                stacks.erase(color);
+                stacks.erase(--stacks.rbegin().base());
 
                 // merge children if present
                 T priority_color = !stacks.empty() ? stacks.rbegin()->first : color;
@@ -357,115 +372,164 @@ protected:
             }
         }
 
+        // connect remaining children to the root
         if (!children.empty()) {
             U root = children.back();
             for (auto& child : children) parents[child] = root;
         }
     };
 
+    template <typename T, typename U>
+    U canonical_point(U position, const Image<T>& image, Parents& parents) {
+        T color = image[position];
+        U parent = parents[position];
 
-
-//        std::stack<U> stack;
-//        Queue<T, U> queue;
-//        Image<uint8_t> deja_vu(0, image.width(), (end - start) / image.width() + 1);
-//
-//        // initialize stacks
-//        stack.push(start);
-//        push<T, U>(queue, image[start], start);
-//        deja_vu[start] = 1;
-//
-//        // start the actual flooding
-//        while (!queue.empty()) {
-//            flood:
-//            U pixel = top(queue);
-//            U representative = stack.top();
-//
-//            Neighbors<T, U> neighbors = this->all_neighbors(image, pixel, start, end);
-//            for (auto neighbor : neighbors) {
-//                uint8_t& is_processed = deja_vu[neighbor.position - start];
-//                // if we visited this pixel already proceed
-//                if (is_processed) continue;
-//
-//                // actually work on the pixel
-//                is_processed = 1;
-//                push(queue, neighbor.color, neighbor.position);
-//
-//                if (image[pixel] < neighbor.color) {
-//                    stack.push(neighbor.position);
-//                    goto flood;
-//                }
-//            }
-//
-//            // current point is done, fix the representative
-//            if (top(queue) != pixel) {
-//                stack.pop();
-//                stack.push(top(queue));
-//                continue;
-//            }
-//            pop(queue);
-//            parents[pixel] = representative;
-//
-//            if (queue.empty()) break;
-//            U next = top(queue);
-//            if (image[next] < image[representative]) {
-//                stack.pop();
-//
-//                while (!stack.empty() and image[next] < image[stack.top()]) {
-//                    representative = (parents[representative] = stack.top());
-//                    stack.pop();
-//                }
-//                if (stack.empty() or image[stack.top()] < image[next]) {
-//                    stack.push(next);
-//                }
-//                parents[representative] = stack.top();
-//            }
-//        }
+        return image[parent] == color ? parent : position;
+    };
 
     template <typename T, typename U=Parents::type>
-    void compute_local_parents(const Image<T>& image, Parents& parents) {
-        std::vector<Root<T, U> > pixels;
-        pixels.reserve(image.size());
-        Parents zpar = parents;
+    void inline merge_single(const Image<T>& image, Parents& parents, AreaRules<U>& area, size_t i, size_t j) {
+        U left_top = DistributedMaxTree::canonize(area, this->canonical_point(i, image, parents));
+        U right_top = DistributedMaxTree::canonize(area, this->canonical_point(j, image, parents));
+        U current;
 
-        // calculate the berger max-tree
-        for (U i = 0; i < image.size(); ++i) {
-            pixels.push_back(Root<T, U>(image[i], i));
-        }
-        std::sort(pixels.begin(), pixels.end());
+        while (true) {
+            // which stack to pop?
+            if (image[left_top] > image[right_top]) {
+                current = left_top;
+                left_top = parents[canonical_point(current, image, parents)];
+            } else if (image[left_top] < image[right_top]) {
+                current = right_top;
+                right_top = parents[canonical_point(current, image, parents)];
+            }
 
-        for (auto it = pixels.crbegin(); it != pixels.crend(); ++it) {
-            T pixel_color = it->first;
-            U position = it->second;
+            // actual better root, take it and connect
+            if (image[left_top] != image[right_top]) {
+                parents[current] = (image[left_top] > image[right_top] ? left_top : right_top);
+                continue;
+            }
 
-            parents[position] = position;
-            zpar[position] = position;
+            // same colored-area, are they already merged? if so, we are done here
+            U left_canonized = DistributedMaxTree::canonize(area, left_top);
+            U right_canonized = DistributedMaxTree::canonize(area, right_top);
+            if (left_canonized == right_canonized) {
+                break;
+            }
 
-            Neighbors<T, U> neighbors = this->all_neighbors(image, position);
-            for (auto& neighbor : neighbors) {
-                T neighbor_color = neighbor.color;
-                U neighbor_position = neighbor.position;
-                if (neighbor_color < pixel_color or (neighbor_color == pixel_color and neighbor_position < position)) continue;
+            // not merged yet, do so and choose which side to pop depending on the parent
+            auto minmax = std::minmax(left_canonized, right_canonized);
+            area[minmax.second] = minmax.first;
 
-                U root = this->find_root(zpar, neighbor_position);
-                parents[root] = position;
-                if (root != position) {
-                    parents[root] = position;
-                    zpar[root] = position;
-                }
+            U left_parent = parents[canonical_point(left_top, image, parents)];
+            U right_parent = parents[canonical_point(right_top, image, parents)];
+
+            if (image[left_parent] > image[right_parent]) {
+                left_top = left_parent;
+                right_top = minmax.first;
+            } else if (image[left_parent] < image[right_parent]){
+                left_top = minmax.first;
+                right_top = right_parent;
+            } else {
+                left_top = left_parent;
+                right_top = right_parent;
             }
         }
+    }
 
-        // berger canonization
-        for (const auto& pixel : pixels) {
-            U position = pixel.second;
-            U parent = parents[position];
-            U parent_parent = parents[parent];
+    template <typename T, typename U>
+    void merge_parents(const Image<T>& image, Parents& parents, U start, AreaRules<U>& area, AreaRules<U>& merge_rules) {
+        // TODO: merge area maps
 
-            if (image[parent_parent] == image[parent]) {
-                parents[position] = parent_parent;
-            }
+        for (size_t i = start - image.width(), j = start; i < start; ++i, ++j) {
+            this->merge_single(image, parents, area, i, j);
+        }
+        if ((start - 1) % image.width() != 0) {
+            this->merge_single(image, parents, area, start - 1, start);
         }
     };
+
+    template <typename U>
+    void apply_rules(Parents& parents, AreaRules<U>& area, U start, U end) {
+        for (size_t i = start; i < end; ++i) {
+            U& pixel = parents[i];
+            pixel = DistributedMaxTree::canonize(area, pixel);
+        }
+    }
+//
+//    template<typename T, typename U=Parents::type>
+//    inline Neighbors<T> lower_neighbors(const Image<T>& image, U position) {
+//        return this->lower_neighbors(image, position, image.size());
+//    }
+//
+//    template<typename T, typename U=Parents::type>
+//    inline Neighbors<T, U> all_neighbors(const Image<T>& image, U position) {
+//        return this->all_neighbors(image, position, 0, image.size());
+//    }
+//
+//    template<typename U=Parents::type>
+//    U find_root(Parents& parents, U position) {
+//        U at = position;
+//        while (parents[at] != at) {
+//            at = parents[at];
+//        }
+//
+//        // path compression
+//        U next_element;
+//        U next = position;
+//        while (next != parents[at]) {
+//            next_element = parents[next];
+//            parents[next] = parents[at];
+//            next = next_element;
+//        }
+//
+//        return parents[at];
+//    }
+//
+//    template <typename T, typename U=Parents::type>
+//    void compute_berger(const Image<T>& image, Parents& parents) {
+//        std::vector<Root<T, U> > pixels;
+//        pixels.reserve(image.size());
+//        Parents zpar = parents;
+//
+//        // calculate the berger max-tree
+//        for (U i = 0; i < image.size(); ++i) {
+//            pixels.push_back(Root<T, U>(image[i], i));
+//        }
+//        std::sort(pixels.begin(), pixels.end());
+//
+//        for (auto it = pixels.crbegin(); it != pixels.crend(); ++it) {
+//            T pixel_color = it->first;
+//            U position = it->second;
+//
+//            parents[position] = position;
+//            zpar[position] = position;
+//
+//            Neighbors<T, U> neighbors = this->all_neighbors(image, position);
+//            for (auto& neighbor : neighbors) {
+//                T neighbor_color = neighbor.color;
+//                U neighbor_position = neighbor.position;
+//                if (neighbor_color < pixel_color or (neighbor_color == pixel_color and neighbor_position < position)) continue;
+//
+//                U root = this->find_root(zpar, neighbor_position);
+//                parents[root] = position;
+//                if (root != position) {
+//                    parents[root] = position;
+//                    zpar[root] = position;
+//                }
+//            }
+//        }
+//
+//        // berger canonization
+//        for (const auto& pixel : pixels) {
+//            U position = pixel.second;
+//            U parent = parents[position];
+//            U parent_parent = parents[parent];
+//
+//            if (image[parent_parent] == image[parent]) {
+//                parents[position] = parent_parent;
+//            }
+//        }
+//    };
 
     template <typename T, typename U=Parents::type>
     TupleBuckets<T, U> get_halo_roots(const Image<T>& image, const Parents& parents, size_t offset) {
