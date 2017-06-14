@@ -54,11 +54,11 @@ public:
     }
 
     inline T& at(size_t x, size_t y) {
-        return this->pixels_[y * width + x];
+        return this->pixels_[y * this->width_ + x];
     }
 
     inline const T& at(size_t x, size_t y) const {
-        return this->pixels_[y * width + x];
+        return this->pixels_[y * this->width_ + x];
     }
 
     inline T* data(size_t index = 0) {

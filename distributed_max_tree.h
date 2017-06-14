@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <future>
 #include <map>
 #include <iostream>
 #include <sstream>
@@ -79,7 +80,7 @@ public:
 //        this->create_root_find_op<T, U>();
 //
 //        // local max tree computation
-        this->compute_salembier(image, parents, 2);
+        this->compute_salembier(image, parents, 1);
 //
 //        // distributed resolution
 //        TupleBuckets<T, U> root_buckets = this->get_halo_roots(image, parents, offset);
@@ -242,12 +243,15 @@ protected:
     template <typename T, typename U=Parents::type>
     void compute_salembier(const Image<T>& image, Parents& parents, unsigned int thread_count=std::thread::hardware_concurrency()) {
         // early out
-        if (thread_count <= 1) return;
+//        if (thread_count <= 1) {
+//            this->compute_salembier_chunk<T, U>(image, parents, 0ul, image.size());
+//            return;
+//        }
         std::cout << image << std::endl << std::endl;
 
         // allocate resources
         thread_count = std::min(thread_count, static_cast<unsigned int>(image.height()));
-        std::vector<std::thread> threads(thread_count);
+        std::vector<std::future<void> > threads(thread_count);
         std::vector<AreaRules<U>> area_rules(thread_count);
 
         U chunk = image.size() / thread_count;
@@ -255,50 +259,52 @@ protected:
 
         // processing loop
         for (size_t t = 0; t < thread_count; ++t) {
-            U start = t * chunk + std::min(t, remainder);
+            U start = (t==0 ? 27 : 27);//t * chunk + std::min(t, remainder);
             U end = (t + 1) * chunk + std::min(t + 1, remainder);
             auto function = &DistributedMaxTree::compute_salembier_chunk<T, U>;
-            threads[t] = std::thread(function, this, std::ref(image), std::ref(parents), start, end);
+//            threads[t] = std::thread(function, this, std::cref(image), std::ref(parents), start, end);
+            threads[t] = std::async(std::launch::async, function, this, std::ref(image), std::ref(parents), start, end);
         }
 
         for (unsigned int t = 0; t < thread_count; ++t) {
-            threads[t].join();
+//            threads[t].join();
+            threads[t].get();
         }
 
         // merge loop
-        size_t steps = static_cast<size_t>(std::ceil(std::log2(thread_count)));
-        for (size_t s = 0; s < steps; ++s) {
-            size_t offset = static_cast<size_t>(std::pow(2.0, s));
-            size_t skip = offset * 2;
+//        size_t steps = static_cast<size_t>(std::ceil(std::log2(thread_count)));
+//        for (size_t s = 0; s < steps; ++s) {
+//            size_t offset = static_cast<size_t>(std::pow(2.0, s));
+//            size_t skip = offset * 2;
+//
+//            // spawn merging threads
+//            for (size_t t = 0; t < thread_count; t += skip) {
+//                U merge_point = t + offset;
+//                U start = merge_point * chunk + std::min(merge_point, remainder);
+//                if (start >= image.size()) continue;
+//
+//                auto function = &DistributedMaxTree::merge_parents<T, U>;
+//                threads[t] = std::thread(function, this, std::cref(image), std::ref(parents),
+//                                         start, std::ref(area_rules[t]), std::ref(area_rules[merge_point]));
+//            }
+//
+//            // barrier
+//            for (size_t t = 0; t < thread_count; t += skip) {
+//                if (threads[t].joinable()) threads[t].join();
+//            }
+//        }
 
-            // spawn merging threads
-            for (size_t t = 0; t < thread_count; t += skip) {
-                U merge_point = t + offset;
-                U start = merge_point * chunk + std::min(merge_point, remainder);
-                if (start >= image.size()) continue;
-
-                auto function = &DistributedMaxTree::merge_parents<T, U>;
-                threads[t] = std::thread(function, this, std::ref(image), std::ref(parents),
-                                         start, std::ref(area_rules[t]), std::ref(area_rules[merge_point]));
-            }
-
-            // barrier
-            for (size_t t = 0; t < thread_count; t += skip) {
-                if (threads[t].joinable()) threads[t].join();
-            }
-        }
-
-        // apply the rules
-        for (size_t t = 0; t < thread_count; ++t) {
-            U start = t * chunk + std::min(t, remainder);
-            U end = (t + 1) * chunk + std::min(t + 1, remainder);
-            auto function = &DistributedMaxTree::apply_rules<U>;
-            threads[t] = std::thread(function, this, std::ref(parents), std::ref(area_rules.front()), start, end);
-        }
-
-        for (size_t t = 0; t < thread_count; ++t) {
-            threads[t].join();
-        }
+//        // apply the rules
+//        for (size_t t = 0; t < thread_count; ++t) {
+//            U start = t * chunk + std::min(t, remainder);
+//            U end = (t + 1) * chunk + std::min(t + 1, remainder);
+//            auto function = &DistributedMaxTree::apply_rules<U>;
+//            threads[t] = std::thread(function, this, std::ref(parents), std::ref(area_rules.front()), start, end);
+//        }
+//
+//        for (size_t t = 0; t < thread_count; ++t) {
+//            threads[t].join();
+//        }
 
         std::cout << parents << std::endl;
     };
@@ -354,9 +360,8 @@ protected:
                     parents[pixel] = canonical;
                 }
 
-                // remove the bucket
                 pixels.erase(color);
-                stacks.erase(--stacks.rbegin().base());
+                stacks.erase(color);//--stacks.rbegin().base());
 
                 // merge children if present
                 T priority_color = !stacks.empty() ? stacks.rbegin()->first : color;
@@ -394,13 +399,17 @@ protected:
         U current;
 
         while (true) {
+            bool started_left = false;
+
             // which stack to pop?
-            if (image[left_top] > image[right_top]) {
+            while (image[left_top] > image[right_top]) {
                 current = left_top;
-                left_top = parents[canonical_point(current, image, parents)];
-            } else if (image[left_top] < image[right_top]) {
+                left_top = parents[current];
+                started_left = true;
+            }
+            while (!started_left and image[left_top] < image[right_top]) {
                 current = right_top;
-                right_top = parents[canonical_point(current, image, parents)];
+                right_top = parents[current];
             }
 
             // actual better root, take it and connect
@@ -420,8 +429,8 @@ protected:
             auto minmax = std::minmax(left_canonized, right_canonized);
             area[minmax.second] = minmax.first;
 
-            U left_parent = parents[canonical_point(left_top, image, parents)];
-            U right_parent = parents[canonical_point(right_top, image, parents)];
+            U left_parent = parents[left_top];
+            U right_parent = parents[right_top];
 
             if (image[left_parent] > image[right_parent]) {
                 left_top = left_parent;
@@ -439,7 +448,6 @@ protected:
     template <typename T, typename U>
     void merge_parents(const Image<T>& image, Parents& parents, U start, AreaRules<U>& area, AreaRules<U>& merge_rules) {
         // TODO: merge area maps
-
         for (size_t i = start - image.width(), j = start; i < start; ++i, ++j) {
             this->merge_single(image, parents, area, i, j);
         }
