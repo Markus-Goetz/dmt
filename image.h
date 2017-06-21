@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "hdf5_wrapper.h"
-#include "util.h"
 
 template<typename T>
 class Image {
@@ -27,23 +26,18 @@ public:
 
     size_t width_;
     size_t height_;
-    size_t offset_;
-
     typedef T type;
 
-    Image()
-            : width_(0), height_(0) {}
+    Image() : width_(0), height_(0) {}
+
+    Image(size_t width, size_t height) : pixels_(width * height), width_(width), height_(height) {}
+
+    Image(T fill, size_t width, size_t height) : pixels_(width * height, fill), width_(width), height_(height) {}
 
     Image(std::initializer_list<T> pixels, size_t width, size_t height)
             : pixels_(pixels), width_(width), height_(height) {
         assert(this->pixels_.size() == this->width_ * this->height_);
     }
-
-    Image(size_t width, size_t height)
-            : pixels_(width * height), width_(width), height_(height) {}
-
-    Image(T fill, size_t width, size_t height)
-            : pixels_(width * height, fill), width_(width), height_(height) {}
 
     inline T& operator[](size_t index) {
         return this->pixels_[index];
