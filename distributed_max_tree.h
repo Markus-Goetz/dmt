@@ -125,7 +125,9 @@ protected:
 
             // find the mapping rules
             for (int i = static_cast<int>(parents->width()), j = 0; i < *len; ++i, ++j) {
-                auto minmax = std::minmax(MaxTree::canonize(*area, in[i]), MaxTree::canonize(*area, out[j]));
+                U left_canonized = MaxTree::canonize(*area, in[i]);
+                U right_canonized = MaxTree::canonize(*area, out[j]);
+                auto minmax = std::minmax(left_canonized, right_canonized);
                 if (minmax.first != minmax.second) (*area)[minmax.second] = minmax.first;
             }
 
