@@ -235,7 +235,7 @@ protected:
     template<typename T, typename U=Parents::type>
     TupleBuckets<T, U> connect_halos(const Image<T>& image, Parents& parents, size_t global_offset, AreaRules<U>& area) {
         TupleBuckets<T, U> area_buckets;
-        //TODO: if (this->size_ == 1) return area_buckets;
+        if (this->size_ == 1) return area_buckets;
 
         const size_t width = parents.width();
         const size_t width2 = width * 2;
@@ -267,7 +267,7 @@ protected:
 
     template<typename T, typename U=Parents::type>
     void resolve_tuples(TupleBuckets<T, U>& area_buckets, TupleBuckets<T, U>& root_buckets) {
-        //TODO: if (this->size_ == 1) return;
+        if (this->size_ == 1) return;
         auto it = root_buckets.rbegin();
 
         while (true) {
@@ -809,7 +809,7 @@ protected:
     template<typename T, typename U=Parents::type>
     void generate_parent_image(Parents& parents, Tuples<T, U>& resolved_area, Tuples<T, U>& resolved_roots, AreaRules<U>& area, size_t offset) {
         // early out for one node
-        //TODO: if (this->size_ == 1) return;
+        if (this->size_ == 1) return;
 
         // actually parse the area tuples first
         area.clear();
