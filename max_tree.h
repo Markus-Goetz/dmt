@@ -74,7 +74,29 @@ public:
             });
         }
         pool.join_all();
-    };
+    }
+
+    // canonize a pixel according to the area remapping rules
+    template<typename U=Parents::type>
+    static U canonize(AreaRules<U>& rules, U origin) {
+        U destination = origin;
+        auto it = rules.find(destination);
+
+        while (it != rules.end() and it->second != destination) {
+            destination = it->second;
+            it = rules.find(destination);
+        }
+        return destination;
+    }
+
+    // determine the canonical point of a pixel
+    template <typename T, typename U>
+    static U canonical_point(U position, const Image<T>& image, Parents& parents) {
+        T color = image[position];
+        U parent = parents[position];
+
+        return image[parent] == color ? parent : position;
+    }
 
 protected:
     // single neighbor
@@ -127,28 +149,6 @@ protected:
         }
 
         return neighbors;
-    }
-
-    // determine the canonical point of a pixel
-    template <typename T, typename U>
-    static U canonical_point(U position, const Image<T>& image, Parents& parents) {
-        T color = image[position];
-        U parent = parents[position];
-
-        return image[parent] == color ? parent : position;
-    };
-
-    // canonize a pixel according to the area remapping rules
-    template<typename U=Parents::type>
-    static U canonize(AreaRules<U>& rules, U origin) {
-        U destination = origin;
-        auto it = rules.find(destination);
-
-        while (it != rules.end() and it->second != destination) {
-            destination = it->second;
-            it = rules.find(destination);
-        }
-        return destination;
     }
 
     // compute ax tree on a chunk of the image, implements salembier's algorithm
@@ -224,7 +224,7 @@ protected:
             U root = children.back();
             for (auto& child : children) parents[child] = root;
         }
-    };
+    }
 
     // merge the max trees of two neighboring images
     template <typename T, typename U>
@@ -246,7 +246,7 @@ protected:
         if (start % image.width() != 0) {
             MaxTree::merge_single(image, parents, area, start - 1, start);
         }
-    };
+    }
 
     template <typename T, typename U=Parents::type>
     static void get_chain(const Image<T>& image, Parents& parents, U start, std::vector<std::pair<T, U>>& chain) {
@@ -256,7 +256,7 @@ protected:
             if (parents[current] == current) break;
             current = parents[current];
         }
-    };
+    }
 
     // merge a single pixel of the neighboring max trees
     template <typename T, typename U=Parents::type>

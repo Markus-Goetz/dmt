@@ -9,9 +9,9 @@ find_package(Threads REQUIRED)
 #set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -instrument ${MPI_CXX_COMPILER}")
 
 set(CMAKE_CXX_COMPILER ${MPI_CXX_COMPILER})
-set(CMAKE_BUILD_TYPE DEBUG)
+set(CMAKE_BUILD_TYPE RELWITHDEBINFO)
 set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic")
 
 include_directories(.)
 include_directories(${HDF5_INCLUDE_DIRS})

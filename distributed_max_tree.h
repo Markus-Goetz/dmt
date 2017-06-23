@@ -1,6 +1,8 @@
 #ifndef DISTRIBUTED_MAX_TREE_H
 #define DISTRIBUTED_MAX_TREE_H
 
+#include <cstdio>
+
 #include <cmath>
 #include <cstdint>
 #include <map>
@@ -22,52 +24,50 @@
 
 class DistributedMaxTree {
 public:
-    DistributedMaxTree(MPI_Comm comm = MPI_COMM_WORLD) : comm_(comm) {
+    DistributedMaxTree(MPI_Comm comm = MPI_COMM_WORLD, unsigned int thread_count=std::thread::hardware_concurrency())
+            : comm_(comm), id_(std::this_thread::get_id()), thread_count_(thread_count) {
         MPI_Comm_rank(comm, &this->rank_);
         MPI_Comm_size(comm, &this->size_);
     }
 
     template<typename T, typename U=Parents::type>
     Parents compute(const Image<T>& image) {
+        // allocate the parent image and buckets for the tuples
+        AreaRules<U> area;
+        Parents parents(Parents::infinity, image.width(), image.height());
+
         // MPI administration
         MPI_Comm_split(this->comm_, 0, this->size_ - this->rank_ - 1, &this->reverse_comm_);
         Tuple<T, U>::create_mpi_type(&this->tuple_type_);
         AreaEndpoint<U>::create_mpi_type(&this->area_endpoint_type_);
-//        this->create_stitch_op<T, U>();
-//        this->create_area_connect_op<U>();
-//        this->create_root_find_op<T, U>();
+        this->create_stitch_op<T, U>(area, parents);
+        this->create_area_connect_op<U>();
+        this->create_root_find_op<T, U>();
 
         // calculate the global pixel offset
         U offset = image.size() - image.width();
         MPI_Exscan(MPI_IN_PLACE, &offset, 1, MPI_Types<U>::map(), MPI_SUM, this->comm_);
         offset = this->rank_ == 0 ? 0 : offset;
 
-        // allocate the parent image and buckets for the tuples
-        AreaRules<U> area;
-        Parents parents(Parents::infinity, image.width(), image.height());
-//
-//        // local max tree computation
-        MaxTree::compute(image, parents, 8);
-//
-//        // distributed resolution
-//        TupleBuckets<T, U> root_buckets = this->get_halo_roots(image, parents, offset);
-//        TupleBuckets<T, U> area_buckets = this->connect_halos(image, parents, offset, area);
-//        this->resolve_tuples(area_buckets, root_buckets);
-//
-//        // send tuples to owners and apply
-//        Tuples<T, U> resolved_area;
-//        Tuples<T, U> resolved_roots;
-//        this->redistribute_tuples(image, area_buckets, resolved_area);
-//        this->redistribute_tuples(image, root_buckets, resolved_roots);
-//        this->generate_parent_image(image, parents, resolved_area, resolved_roots, area, offset);
+        // local max tree computation
+        MaxTree::compute(image, parents, this->thread_count_);
+        // distributed resolution
+        TupleBuckets<T, U> root_buckets = this->get_halo_roots(image, parents, offset);
+        TupleBuckets<T, U> area_buckets = this->connect_halos(image, parents, offset, area);
+        this->resolve_tuples(area_buckets, root_buckets);
+
+        // send tuples to owners and apply
+        Tuples<T, U> resolved_area, resolved_roots;
+        this->redistribute_tuples(image, area_buckets, resolved_area);
+        this->redistribute_tuples(image, root_buckets, resolved_roots);
+        this->generate_parent_image(parents, resolved_area, resolved_roots, area, offset);
 
         // MPI clean up
-//        MPI_Op_free(&this->area_connect_);
-//        MPI_Op_free(&this->root_find_);
-//        MPI_Op_free(&this->left_stitch_);
-//        MPI_Op_free(&this->stitch_);
-        MPI_Type_free(&this->area_endpoint_type_);
-        MPI_Type_free(&this->tuple_type_);
+        this->free_root_find_op<T, U>();
+        this->free_area_connect_op<U>();
+        this->free_stitch_op<T, U>();
+        AreaEndpoint<U>::free_mpi_type(&this->area_endpoint_type_);
+        Tuple<T, U>::free_mpi_type(&this->tuple_type_);
         MPI_Comm_free(&this->reverse_comm_);
 
         return parents;
@@ -87,41 +87,59 @@ protected:
     int rank_;
     int size_;
 
-    template<typename T, typename U=Parents::type>
-    void create_stitch_op() {
-        auto stitch = [](void* in_, void* out_, int* len, MPI_Datatype*) {
+    std::thread::id id_;
+    unsigned int thread_count_;
+
+    template <typename U=Parents::type>
+    using StitchElement = std::pair<AreaRules<U>*, Parents*>;
+    template <typename U=Parents::type>
+    using StitchElements = std::unordered_map<std::thread::id, StitchElement<U>>;
+
+    template <typename T, typename U=Parents::type>
+    static std::mutex& get_stitch_mutex() {
+        static std::mutex stitch_mutex_;
+        return stitch_mutex_;
+    }
+
+    template <typename T, typename U=Parents::type>
+    static StitchElements<U>& get_stitch_elements() {
+        static StitchElements<U> stitch_elements_;
+        return stitch_elements_;
+    }
+
+    template <typename T, typename U=Parents::type>
+    void create_stitch_op(AreaRules<U>& area_, Parents& parents_) {
+        DistributedMaxTree::get_stitch_mutex<T, U>().lock();
+        DistributedMaxTree::get_stitch_elements<T, U>()[this->id_] = std::make_pair(&area_, &parents_);
+        DistributedMaxTree::get_stitch_mutex<T, U>().unlock();
+
+        MPI_Op_create([](void* in_, void* out_, int* len, MPI_Datatype*) {
             U* in = reinterpret_cast<U*>(in_);
             U* out = reinterpret_cast<U*>(out_);
 
-            std::vector<size_t> a(in, in + *len);
-            std::vector<size_t> b(out, out + *len);
-            return;
+            DistributedMaxTree::get_stitch_mutex<T, U>().lock();
+            StitchElement<U> content = DistributedMaxTree::get_stitch_elements<T, U>()[std::this_thread::get_id()];
+            DistributedMaxTree::get_stitch_mutex<T, U>().unlock();
+            AreaRules<U>* area = content.first;
+            Parents* parents = content.second;
 
-            AreaRules<U> area;
-            for (int i = 0, j = *len; i < *len; ++i, ++j) {
-                auto min_max = std::minmax(in[j], out[i]);
-                auto it = area.find(min_max.first);
-
-                if (it != area.end() and it->second != min_max.first) {
-                    U known_head = DistributedMaxTree::canonize(area, min_max.first);
-                    U incoming_head = DistributedMaxTree::canonize(area, it->second);
-                    area[min_max.second] = std::min(known_head, incoming_head);
-                } else if (min_max.second != min_max.first) {
-                    area[min_max.second] = min_max.first;
-                }
+            // find the mapping rules
+            for (int i = static_cast<int>(parents->width()), j = 0; i < *len; ++i, ++j) {
+                auto minmax = std::minmax(MaxTree::canonize(*area, in[i]), MaxTree::canonize(*area, out[j]));
+                if (minmax.first != minmax.second) (*area)[minmax.second] = minmax.first;
             }
 
-            // canonize the lower image halo and send further
-            for (int i = *len; i < *len << 1; ++i) {
-                out[i] = DistributedMaxTree::canonize(area, out[i]);
+            // apply the mapping rules on the left outer border of the left image and the right outer border of the right image
+            for (size_t i = 0; i < parents->width(); ++i) {
+                out[i] = MaxTree::canonize(*area, in[i]);
+                out[i + parents->width()] = MaxTree::canonize(*area, out[i + parents->width()]);
             }
-        };
-        MPI_Op_create(stitch, false, &this->stitch_);
+        }, false, &this->stitch_);
     }
 
     template<typename U=Parents::type>
     void create_area_connect_op() {
-        auto connect = [](void* in_, void* out_, int*, MPI_Datatype*) {
+        MPI_Op_create([](void* in_, void* out_, int*, MPI_Datatype*) {
             AreaEndpoint<U>* in = reinterpret_cast<AreaEndpoint<U>*>(in_);
             AreaEndpoint<U>* out = reinterpret_cast<AreaEndpoint<U>*>(out_);
 
@@ -137,14 +155,12 @@ protected:
             if (out_left.from == out_right.from) {
                 out_right = out_left;
             }
-        };
-
-        MPI_Op_create(connect, false, &this->area_connect_);
+        }, false, &this->area_connect_);
     }
 
     template<typename T, typename U=Parents::type>
     void create_root_find_op() {
-        auto connect = [](void* in_, void* out_, int*, MPI_Datatype*) {
+        MPI_Op_create([](void* in_, void* out_, int*, MPI_Datatype*) {
             Endpoints<T, U>* in = reinterpret_cast<Endpoints<T, U>*>(in_);
             Endpoints<T, U>* out = reinterpret_cast<Endpoints<T, U>*>(out_);
 
@@ -153,9 +169,9 @@ protected:
             Tuple<T, U>& out_right = out->back();
 
             if (in_right.from == out_left.from and (
-                   (in_right.neighbor_color > out_left.neighbor_color) or
-                   (in_right.neighbor_color == out_left.neighbor_color and in_right.to < out_left.to)
-                )) {
+                    (in_right.neighbor_color > out_left.neighbor_color) or
+                    (in_right.neighbor_color == out_left.neighbor_color and in_right.to < out_left.to)
+            )) {
                 out_left.neighbor_color = in_right.neighbor_color;
                 out_left.to = in_right.to;
             }
@@ -164,9 +180,7 @@ protected:
             if (out_left.from == out_right.from) {
                 out_right = out_left;
             }
-        };
-
-        MPI_Op_create(connect, false, &this->root_find_);
+        }, false, &this->root_find_);
     }
 
     template <typename T, typename U=Parents::type>
@@ -182,7 +196,7 @@ protected:
         }
 
         return roots;
-    };
+    }
 
     template <typename T, typename U=Parents::type>
     void get_one_sided_halo_roots(const Image<T>& image, const Parents& parents, TupleBuckets<T, U>& roots, size_t start, std::unordered_set<U>& seen, size_t offset) {
@@ -200,10 +214,6 @@ protected:
                 parent = parents[location];
             }
         }
-    };
-
-    void add_offset(Parents& parents, size_t offset) {
-        for (auto& pixel : parents) pixel += offset;
     }
 
     template <typename T, typename U=Parents::type>
@@ -218,46 +228,44 @@ protected:
             ++i;
         }
         return destination;
-    };
+    }
 
     template<typename T, typename U=Parents::type>
     TupleBuckets<T, U> connect_halos(const Image<T>& image, Parents& parents, size_t global_offset, AreaRules<U>& area) {
-//        TupleBuckets<T, U> area_buckets;
-//        if (this->size_ == 1) return area_buckets;
-//
-//        size_t width = parents.width();
-//        size_t offset = parents.size() - width;
-//        std::vector<U> send_buffer(width);
-//        std::vector<U> recv_buffer(width);
-//
-//        // right directed communication of minimum
-//        size_t start = (this->rank_ != 0 ? 0 : offset);
-//        for (size_t i = start, j = 0; i < start + width; ++i, ++j) {
-//            send_buffer[j] = (image[i] == image[parents[i]] ? parents[i] : i) + global_offset;
-//        }
-//        MPI_Scan(send_buffer.data(), recv_buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
-//
-//        // left directed, backwards propagation of right minimum scan results
-//        start = (this->rank_ + 1 == this->size_ ? 0 : offset);
-//        for (size_t i = start, j = 0; i < start + width; ++i, ++j) {
-//            U parent = (image[i] == image[parents[i]] ? parents[i] : i) + global_offset;
-//            send_buffer[j] = DistributedMaxTree::canonize(area, parent);
-//        }
-//        MPI_Scan(send_buffer.data(), recv_buffer.data(), width,
-//                 MPI_Types<U>::map(), this->left_stitch_, this->reverse_comm_);
-//
-//        for (const auto& rule : area) {
-//            T color = image[rule.first - global_offset];
-//            area_buckets[color].push_back(Tuple<T, U>(color, rule.first, color, rule.second));
-//            area_buckets[color].push_back(Tuple<T, U>(color, rule.second, color, rule.first));
-//        }
-//
-//        return area_buckets;
+        TupleBuckets<T, U> area_buckets;
+        //TODO: if (this->size_ == 1) return area_buckets;
+
+        const size_t width = parents.width();
+        const size_t width2 = width * 2;
+        std::vector<U> send_buffer(width2);
+
+        // right directed communication of minimum
+        for (size_t i = 0, j = image.size() - width; i < width; ++i, ++j) {
+            send_buffer[i] = MaxTree::canonical_point(i, image, parents) + global_offset;
+            send_buffer[i + width] = MaxTree::canonical_point(j, image, parents) + global_offset;
+        }
+        MPI_Scan(MPI_IN_PLACE, send_buffer.data(), width2, MPI_Types<U>::map(), this->stitch_, this->comm_);
+
+        // left directed, backwards propagation of right minimum scan results
+        for (size_t i = 0, j = image.size() - width; i < width; ++i, ++j) {
+            send_buffer[i + width] = MaxTree::canonize(area, MaxTree::canonical_point(i, image, parents) + global_offset);
+            send_buffer[i] = MaxTree::canonize(area, MaxTree::canonical_point(j, image, parents) + global_offset);
+        }
+        MPI_Scan(MPI_IN_PLACE, send_buffer.data(), width2, MPI_Types<U>::map(), this->stitch_, this->reverse_comm_);
+
+        for (const auto& rule : area) {
+            if (rule.first < global_offset or rule.first >= global_offset + image.size()) continue;
+            T color = image[rule.first - global_offset];
+            area_buckets[color].push_back(Tuple<T, U>(color, rule.first, color, rule.second));
+            area_buckets[color].push_back(Tuple<T, U>(color, rule.second, color, rule.first));
+        }
+
+        return area_buckets;
     }
 
     template<typename T, typename U=Parents::type>
     void resolve_tuples(TupleBuckets<T, U>& area_buckets, TupleBuckets<T, U>& root_buckets) {
-        if (this->size_ == 1) return;
+        //TODO: if (this->size_ == 1) return;
         auto it = root_buckets.rbegin();
 
         while (true) {
@@ -272,7 +280,7 @@ protected:
             if (it != root_buckets.rend() and color == it->first) ++it;
 
             // resolve the area chain
-            bool unresolved= true;
+            bool unresolved = true;
             Tuples<T, U>& area_bucket = area_buckets[color];
             Tuples<T, U>& root_bucket = root_buckets[color];
 
@@ -283,7 +291,6 @@ protected:
                 unresolved = this->remap_area_tuples(area_bucket, area);
                 MPI_Allreduce(MPI_IN_PLACE, &unresolved, 1, MPI_C_BOOL, MPI_LOR, this->comm_); // globally done?
             }
-
             // resolve the roots
             add_area_tuples_to_roots(root_bucket, area_bucket);
             this->resolve_roots(color, root_buckets, area_buckets);
@@ -377,7 +384,7 @@ protected:
         // exchange the incoming tuples with the bucket
         bucket.swap(incoming_tuples);
         this->balance_tuples(bucket);
-    };
+    }
 
     template <typename T, typename U=Parents::type>
     void balance_tuples(Tuples<T, U>& bucket) {
@@ -419,7 +426,7 @@ protected:
         MPI_Alltoallv(bucket.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
                       incoming.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
         bucket.swap(incoming);
-    };
+    }
 
     template <typename T, typename U=Parents::type>
     void resolve_area_chain(Tuples<T, U>& tuples, AreaRules<U>& area) {
@@ -428,7 +435,7 @@ protected:
             U to = tuple.to;
 
             if (to > from) std::swap(from, to);
-            U canonical_point = DistributedMaxTree::canonize(area, from);
+            U canonical_point = MaxTree::canonize(area, from);
 
             if (to == canonical_point) {
                 area[from] = to;
@@ -450,7 +457,7 @@ protected:
         MPI_Scan(MPI_IN_PLACE, ends.data(), ends.size(), this->area_endpoint_type_, this->area_connect_, this->reverse_comm_);
         std::swap(ends.front(), ends.back());
         this->stitch_area_ends(ends, area);
-    };
+    }
 
 
     template <typename T, typename U=Parents::type>
@@ -463,17 +470,17 @@ protected:
         auto left_from_to = std::minmax(front.from, front.to);
         left.from = left_from_to.second;
         left.to = left_from_to.first;
-        left.canonical_to = DistributedMaxTree::canonize(area, left.from);
+        left.canonical_to = MaxTree::canonize(area, left.from);
 
         Tuple<T, U>& back = tuples.back();
         AreaEndpoint<U>& right = ends.back();
         auto right_from_to = std::minmax(back.from, back.to);
         right.from = right_from_to.second;
         right.to = right_from_to.first;
-        right.canonical_to = DistributedMaxTree::canonize(area, right.from);
+        right.canonical_to = MaxTree::canonize(area, right.from);
 
         return ends;
-    };
+    }
 
     template <typename U=Parents::type>
     void stitch_area_ends(AreaEndpoints<U>& ends, AreaRules<U>& area) {
@@ -484,7 +491,7 @@ protected:
             area[left.to] = left.canonical_to;
         if (right.to != right.canonical_to)
             area[right.to] = right.canonical_to;
-    };
+    }
 
     template <typename T, typename U=Parents::type>
     bool remap_area_tuples(Tuples<T, U>& area_bucket, AreaRules<U>& area) {
@@ -497,7 +504,7 @@ protected:
             U from = tuple->from;
             U to = tuple->to;
             if (from < to) std::swap(from, to);
-            U area_root = DistributedMaxTree::canonize(area, from);
+            U area_root = MaxTree::canonize(area, from);
 
             if (to != area_root) {
                 unresolved = true;
@@ -511,7 +518,7 @@ protected:
         }
 
         return unresolved;
-    };
+    }
 
     template <typename T, typename U=Parents::type>
     void add_area_tuples_to_roots(Tuples<T, U>& root_bucket, Tuples<T, U>& area_bucket) {
@@ -640,7 +647,7 @@ protected:
         this->stitch_ends(root_ends, roots);
 
         this->remap_root_tuples(color, root_buckets, area_buckets, roots);
-    };
+    }
 
     template<typename T, typename U=Parents::type>
     void initialize_ends(Endpoints<T, U>& ends, Tuples<T, U>& tuples, RootRules<T, U>& roots) {
@@ -661,7 +668,7 @@ protected:
         Root<T, U>& right_root = roots.find(right.from)->second;
         right.neighbor_color = right_root.first;
         right.to = right_root.second;
-    };
+    }
 
     template <typename T, typename U=Parents::type>
     void stitch_ends(Endpoints<T, U>& ends, RootRules<T, U>& roots) {
@@ -670,7 +677,7 @@ protected:
 
         const Tuple<T, U>& right = ends.back();
         roots[right.from] = Root<T, U>(right.neighbor_color, right.to);
-    };
+    }
 
     template <typename T, typename U=Parents::type>
     void remap_root_tuples(T color, TupleBuckets<T, U>& root_buckets, TupleBuckets<T, U>& area_buckets, RootRules<T, U>& roots) {
@@ -716,7 +723,7 @@ protected:
             area_bucket.push_back(Tuple<T, U>(tuple_color, from, tuple_color, to));
             area_bucket.push_back(Tuple<T, U>(tuple_color, to, tuple_color, from));
         }
-    };
+    }
 
     template<typename T, typename U=Parents::type>
     void redistribute_tuples(const Image<T>& image, TupleBuckets<T, U>& buckets, Tuples<T, U>& resolved) {
@@ -795,35 +802,24 @@ protected:
 
         MPI_Alltoallv(outgoing.data(), send_counts.data(), send_displs.data(), this->tuple_type_,
                       resolved.data(), recv_counts.data(), recv_displs.data(), this->tuple_type_, this->comm_);
-    };
+    }
 
     template<typename T, typename U=Parents::type>
-    void generate_parent_image(const Image<T>& image, Parents& parents, Tuples<T, U>& resolved_area, Tuples<T, U>& resolved_roots, AreaRules<U>& area, size_t offset) {
+    void generate_parent_image(Parents& parents, Tuples<T, U>& resolved_area, Tuples<T, U>& resolved_roots, AreaRules<U>& area, size_t offset) {
         // early out for one node
-        if (this->size_ == 1) return;
+        //TODO: if (this->size_ == 1) return;
 
         // actually parse the area tuples first
         area.clear();
         for (const auto& tuple : resolved_area) {
+            if (tuple.from < tuple.to) continue;
             area[tuple.from] = tuple.to;
         }
-
-        // normalize the halo zone and communicate it to the neighbor nodes
-        size_t width = parents.width();
-        size_t halo_offset = image.size() - width;
-        std::vector<U> send_buffer(width);
-        std::vector<U> buffer(width);
-
-        for (size_t i = halo_offset, j = 0; i < image.size(); ++i, ++j) {
-            U local = (image[i] == image[parents[i]] ? parents[i] : i) + offset;
-            send_buffer[j] = DistributedMaxTree::canonize(area, local);
-        }
-//        MPI_Scan(send_buffer.data(), buffer.data(), width, MPI_Types<U>::map(), this->right_stitch_, this->comm_);
 
         // canonize the flat areas
         for (auto& pixel : parents) {
             pixel += offset;
-            pixel = DistributedMaxTree::canonize(area, pixel);
+            pixel = MaxTree::canonize(area, pixel);
         }
 
         // canonize the former area roots
@@ -835,7 +831,24 @@ protected:
         for (const auto& root : resolved_roots) {
             parents[root.from - offset] = root.to;
         }
-    };
+    }
+
+    template <typename T, typename U=Parents::type>
+    void free_stitch_op() {
+        DistributedMaxTree::get_stitch_mutex<T, U>().lock();
+        DistributedMaxTree::get_stitch_elements<T, U>().erase(this->id_);
+        DistributedMaxTree::get_stitch_mutex<T, U>().unlock();
+    }
+
+    template <typename U=Parents::type>
+    void free_area_connect_op() {
+        MPI_Op_free(&this->area_connect_);
+    }
+
+    template <typename T, typename U=Parents::type>
+    void free_root_find_op() {
+        MPI_Op_free(&this->root_find_);
+    }
 };
 
 #endif // DISTRIBUTED_MAX_TREE_H

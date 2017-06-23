@@ -1,11 +1,9 @@
 #include <cstdint>
 #include <iostream>
-#include <string>
 #include <map>
 
 #include <mpi.h>
 
-#include "image.h"
 #include "distributed_max_tree.h"
 
 int main(int argc, char** argv) {

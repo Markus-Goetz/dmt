@@ -80,6 +80,10 @@ struct Tuple {
         MPI_Type_create_struct(parts, counts, displacements, types, type);
         MPI_Type_commit(type);
     }
+
+    static void free_mpi_type(MPI_Datatype* type) {
+        MPI_Type_free(type);
+    }
 };
 
 template<typename T, typename U=Parents::type>
