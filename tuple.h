@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <limits>
+#include <map>
 #include <sstream>
 #include <tuple>
 #include <vector>
@@ -51,7 +52,6 @@ struct Tuple {
         return os << ss.str();
     }
 
-
     static void create_mpi_type(MPI_Datatype* type) {
         Tuple <T, U> tuple;
 
@@ -80,12 +80,16 @@ struct Tuple {
         MPI_Type_create_struct(parts, counts, displacements, types, type);
         MPI_Type_commit(type);
     }
+
+    static void free_mpi_type(MPI_Datatype* type) {
+        MPI_Type_free(type);
+    }
 };
 
 template<typename T, typename U=Parents::type>
 using Tuples = std::vector<Tuple<T, U> >;
 
 template<typename T, typename U=Parents::type>
-using TupleBuckets = std::vector<Tuples<T, U> >;
+using TupleBuckets = std::map<T, Tuples<T, U> >;
 
 #endif // TUPLE_H
