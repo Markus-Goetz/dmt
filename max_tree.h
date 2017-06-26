@@ -241,6 +241,7 @@ protected:
             area[rule.first] = minmax.first;
             area[minmax.second] = minmax.first;
         }
+        merge_rules.clear();
 
         // detect new rules
         for (size_t i = start - image.width(), j = start; i < start; ++i, ++j) {
