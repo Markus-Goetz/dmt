@@ -126,7 +126,7 @@ public:
             this->bailout = true;
             this->job_available_var.notify_all();
 
-            for (auto &x : threads) {
+            for (auto &x : this->threads) {
                 if (x.joinable()) {
                     x.join();
                 }

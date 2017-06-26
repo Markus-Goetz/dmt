@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -57,7 +58,7 @@ public:
                 auto& rules = area_rules[t];
                 auto& merge_rules = area_rules[merge_point];
 
-                pool.add_job([t, &image, &parents, start, &rules, &merge_rules] {
+                pool.add_job([&image, &parents, start, &rules, &merge_rules] {
                     MaxTree::merge_parents(image, parents, start, rules, merge_rules);
                 });
             }
@@ -86,6 +87,8 @@ public:
             destination = it->second;
             it = rules.find(destination);
         }
+        if (origin != destination) rules[origin] = destination;
+
         return destination;
     }
 
