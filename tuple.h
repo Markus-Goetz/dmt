@@ -8,6 +8,8 @@
 #include <tuple>
 #include <vector>
 
+#include "mpi_wrapper.h"
+
 template<typename T, typename U=Parents::type>
 struct Tuple {
     T color = std::numeric_limits<T>::max();

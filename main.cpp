@@ -3,8 +3,8 @@
 
 #include <mpi.h>
 
-#include <image.h>
-#include <distributed_max_tree.h>
+#include "distributed_max_tree.h"
+#include "image.h"
 
 int main(int argc, char** argv)
 {

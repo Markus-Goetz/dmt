@@ -82,12 +82,14 @@ public:
     static U canonize(AreaRules<U>& rules, U origin) {
         U destination = origin;
         auto it = rules.find(destination);
+        size_t i = 0;
 
         while (it != rules.end() and it->second != destination) {
             destination = it->second;
             it = rules.find(destination);
+            ++i;
         }
-        if (origin != destination) rules[origin] = destination;
+        if (i > 1) rules[origin] = destination;
 
         return destination;
     }
@@ -108,6 +110,13 @@ protected:
         U position;
         T color;
         Neighbor(T color_, U position_) : position(position_), color(color_) {}
+    };
+
+    template <typename T, typename U=Parents::type>
+    struct Child {
+        U canonical;
+        T color;
+        Child(T color_, U canonical_) : canonical(canonical_), color(color_) {}
     };
 
     // set of neighbors
@@ -157,10 +166,10 @@ protected:
     // compute ax tree on a chunk of the image, implements salembier's algorithm
     template <typename T, typename U=Parents::type>
     static void compute_chunk(const Image<T>& image, Parents& parents, Image<uint8_t>& deja_vu, U start, U end) {
-        std::vector<T> merge_color;
-        std::vector<U> children;
         std::map<T, std::vector<U> > stacks;
         std::unordered_map<T, std::vector<U> > pixels;
+        std::unordered_map<U, U> area_values;
+        std::vector<Child<T, U>> children;
 
         T start_color = image[start];
         stacks[start_color].push_back(start);
@@ -199,6 +208,7 @@ protected:
                 // determine canonical point
                 std::sort(pixel_bucket.begin(), pixel_bucket.end());
                 const U canonical = pixel_bucket.front();
+                U area_size = pixel_bucket.size();
 
                 // canonize flooded area
                 for (auto& pixel : pixel_bucket) {
@@ -210,22 +220,21 @@ protected:
 
                 // merge children if present
                 T priority_color = !stacks.empty() ? stacks.rbegin()->first : color;
-                while (!children.empty() and merge_color.back() > priority_color) {
-                    parents[children.back()] = canonical;
+                while (!children.empty() and children.back().color > priority_color) {
+                    parents[children.back().canonical] = canonical;
                     children.pop_back();
-                    merge_color.pop_back();
                 }
 
                 // add this area as child
-                children.push_back(canonical);
-                merge_color.push_back(priority_color);
+                area_values[canonical] = area_size;
+                children.push_back(Child<T, U>(priority_color, canonical));
             }
         }
 
         // connect remaining children to the root
         if (!children.empty()) {
-            U root = children.back();
-            for (auto& child : children) parents[child] = root;
+            U root = children.back().canonical;
+            for (auto& child : children) parents[child.canonical] = root;
         }
     }
 
@@ -252,42 +261,43 @@ protected:
         }
     }
 
+    // merge a single pixel of the neighboring max trees
     template <typename T, typename U=Parents::type>
-    static void get_chain(const Image<T>& image, Parents& parents, U start, std::vector<std::pair<T, U>>& chain) {
-        U current = start;
-        while (true) {
-            chain.push_back(std::pair<T, U>(image[current], current));
-            if (parents[current] == current) break;
-            current = parents[current];
+    static void inline merge_single(const Image<T>& image, Parents& parents, AreaRules<U>& area, size_t i, size_t j) {
+        U x = MaxTree::canonize(area, MaxTree::canonical_point(j, image, parents));
+        U y = MaxTree::canonize(area, MaxTree::canonical_point(i, image, parents));
+
+        if (image[y] > image[x] or (image[y] == image[x] and y > x)) std::swap(x, y);
+        while (x != y and y != Parents::infinity) {
+            U z = parents[x] == x ? Parents::infinity : parents[x];
+            if (image[z] >= image[y] and z != Parents::infinity) {
+                x = z;
+            } else if (image[x] == image[y]) {
+                U x_canonized = MaxTree::canonize(area, x);
+                U y_canonized = MaxTree::canonize(area, y);
+                auto directed = std::minmax(x_canonized, y_canonized);
+                area[directed.second] = directed.first;
+
+                x = directed.first;
+                y = MaxTree::closer(directed.first, directed.second, image, parents);
+                if (y != Parents::infinity) parents[directed.first] = (y == z) ? parents[y_canonized] : z;
+                parents[directed.second] = directed.first;
+            } else {
+                parents[x] = y;
+                x = y;
+                y = z;
+            }
         }
     }
 
-    // merge a single pixel of the neighboring max trees
     template <typename T, typename U=Parents::type>
-    static void merge_single(const Image<T>& image, Parents& parents, AreaRules<U>& area, size_t i, size_t j) {
-        std::vector<std::pair<T, U>> chain;
-        U left = MaxTree::canonize(area, MaxTree::canonical_point(i, image, parents));
-        U right = MaxTree::canonize(area, MaxTree::canonical_point(j, image, parents));
-
-        MaxTree::get_chain<T, U>(image, parents, left, chain);
-        size_t middle = chain.size();
-        MaxTree::get_chain<T, U>(image, parents, right, chain);
-        std::inplace_merge(chain.begin(), chain.begin() + middle, chain.end(), std::greater<std::pair<T, U>>());
-
-        for (auto it = chain.begin(); it != chain.end() - 1; ++it) {
-            auto next = it + 1;
-
-            // merge areas
-            if (it->first == next->first) {
-                auto directed = std::minmax(it->second, next->second);
-                if (directed.first == directed.second) break;
-                area[directed.second] = directed.first;
-                parents[directed.second] = directed.first;
-                next->second = directed.first;
-            } else {
-                parents[it->second] = next->second;
-            }
-        }
+    static U closer(U x, U y, const Image<T>& image, Parents& parents) {
+        U x_parent = parents[x];
+        U y_parent = parents[y];
+        if (x == x_parent or y == y_parent) return Parents::infinity;
+        if (image[x_parent] > image[y_parent]) return x_parent;
+        if (image[y_parent] > image[x_parent]) return y_parent;
+        return std::max(x_parent, y_parent);
     }
 
     // remap the found area rules

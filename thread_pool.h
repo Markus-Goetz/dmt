@@ -33,7 +33,7 @@ class ThreadPool {
      *  Notify the main thread that a job has completed.
      */
     void task() {
-        while(!this->bailout) {
+        while (!this->bailout) {
             this->next_job()();
             --this->jobs_left;
             this->wait_var.notify_one();
