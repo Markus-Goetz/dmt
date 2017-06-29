@@ -46,19 +46,25 @@ public:
         U offset = image.size() - image.width();
         MPI_Exscan(MPI_IN_PLACE, &offset, 1, MPI_Types<U>::map(), MPI_SUM, this->comm_);
         offset = this->rank_ == 0 ? 0 : offset;
-
+	printf("Starting...\n");
         // local max tree computation
-        MaxTree::compute(image, parents, this->thread_count_);
+        MaxTree::compute(image, parents, 4);//this->thread_count_);
         // distributed resolution
+        double begin = MPI_Wtime();
         TupleBuckets<T, U> root_buckets = this->get_halo_roots(image, parents, offset);
+	printf("R: %d root buckets in %f\n", this->rank_, MPI_Wtime() - begin);
         TupleBuckets<T, U> area_buckets = this->connect_halos(image, parents, offset, area);
+	printf("R: %d area buckets in %f\n", this->rank_, MPI_Wtime() - begin);
         this->resolve_tuples(area_buckets, root_buckets);
+        printf("R: %d resolve tuples in %f\n", this->rank_, MPI_Wtime() - begin);
 
         // send tuples to owners and apply
         Tuples<T, U> resolved_area, resolved_roots;
         this->redistribute_tuples(image, area_buckets, resolved_area);
         this->redistribute_tuples(image, root_buckets, resolved_roots);
+        printf("R: %d redistribute in %f\n", this->rank_, MPI_Wtime() - begin);
         this->generate_parent_image(parents, resolved_area, resolved_roots, area, offset);
+        printf("R: %d generate parent image in %f\n", this->rank_, MPI_Wtime() - begin);
 
         // MPI clean up
         this->free_root_find_op<T, U>();
