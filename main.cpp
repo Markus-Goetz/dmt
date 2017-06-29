@@ -6,8 +6,7 @@
 #include "distributed_max_tree.h"
 #include "image.h"
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
     int rank, size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -42,6 +41,6 @@ int main(int argc, char** argv)
         }
         return MPI_Finalize();
     }
-    
+
     return MPI_Finalize();
 }

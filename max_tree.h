@@ -66,10 +66,10 @@ public:
         }
 
         // apply the rules
+        auto& rules = area_rules.front();
         for (size_t t = 0; t < thread_count; ++t) {
             U start = t * chunk + std::min(t, remainder);
             U end = (t + 1) * chunk + std::min(t + 1, remainder);
-            auto& rules = area_rules.front();
             pool.add_job([&parents, &rules, start, end] {
                 MaxTree::apply_rules(parents, rules, start, end);
             });
@@ -242,6 +242,7 @@ protected:
         for (auto& rule : merge_rules) {
             U left = MaxTree::canonize(area, rule.first);
             U right = MaxTree::canonize(merge_rules, rule.first);
+            if (left == right) continue;
             auto minmax = std::minmax(left, right);
 
             area[rule.first] = minmax.first;
