@@ -65,12 +65,9 @@ class ThreadPool {
 
 public:
     ThreadPool(size_t _thread_count) : thread_count(_thread_count), jobs_left(0), bailout(false), finished(false) {
-	cpu_set_t affinity;
         this->threads.reserve(_thread_count);
         for (size_t i = 0; i < _thread_count; ++i) {
-	    CPU_ZERO(&affinity); CPU_SET(i, &affinity);
             this->threads.push_back(std::thread([this] { this->task(); }));
-	    pthread_setaffinity_np(threads[i].native_handle(), sizeof(cpu_set_t), &affinity);
         }
     }
 

@@ -34,15 +34,12 @@ public:
         U chunk = image.size() / thread_count;
         U remainder = image.size() % thread_count;
 
-	double begin = MPI_Wtime();
-
         // processing loop
         for (size_t t = 0; t < thread_count; ++t) {
             U start = t * chunk + std::min(t, remainder);
             U end = (t + 1) * chunk + std::min(t + 1, remainder);
-            pool.add_job([t, begin, &image, &parents, &deja_vu, start, end] {
+            pool.add_job([&image, &parents, &deja_vu, start, end] {
                 MaxTree::compute_chunk<T, U>(image, parents, deja_vu, start, end);
-		printf("T: %lu finished in %f\n", t, MPI_Wtime() - begin);
             });
         }
         pool.wait_all();
@@ -61,9 +58,8 @@ public:
                 auto& rules = area_rules[t];
                 auto& merge_rules = area_rules[merge_point];
 
-                pool.add_job([t, s, begin, &image, &parents, start, &rules, &merge_rules] {
+                pool.add_job([&image, &parents, start, &rules, &merge_rules] {
                     MaxTree::merge_parents(image, parents, start, rules, merge_rules);
-		    printf("T: %lu finished layer %lu in %f\n", t, s, MPI_Wtime() - begin);
                 });
             }
             pool.wait_all();
@@ -74,9 +70,8 @@ public:
             U start = t * chunk + std::min(t, remainder);
             U end = (t + 1) * chunk + std::min(t + 1, remainder);
             auto& rules = area_rules.front();
-            pool.add_job([t, begin, &parents, &rules, start, end] {
+            pool.add_job([&parents, &rules, start, end] {
                 MaxTree::apply_rules(parents, rules, start, end);
-		printf("T: %lu finished applying in %f\n", t, MPI_Wtime() - begin);
             });
         }
         pool.join_all();
@@ -173,7 +168,6 @@ protected:
     static void compute_chunk(const Image<T>& image, Parents& parents, Image<uint8_t>& deja_vu, U start, U end) {
         std::map<T, std::vector<U> > stacks;
         std::unordered_map<T, std::vector<U> > pixels;
-        std::unordered_map<U, U> area_values;
         std::vector<Child<T, U>> children;
 
         T start_color = image[start];
@@ -213,7 +207,6 @@ protected:
                 // determine canonical point
                 std::sort(pixel_bucket.begin(), pixel_bucket.end());
                 const U canonical = pixel_bucket.front();
-                U area_size = pixel_bucket.size();
 
                 // canonize flooded area
                 for (auto& pixel : pixel_bucket) {
@@ -231,7 +224,6 @@ protected:
                 }
 
                 // add this area as child
-                area_values[canonical] = area_size;
                 children.push_back(Child<T, U>(priority_color, canonical));
             }
         }
