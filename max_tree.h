@@ -34,12 +34,15 @@ public:
         U chunk = image.size() / thread_count;
         U remainder = image.size() % thread_count;
 
+	double begin = MPI_Wtime();
+
         // processing loop
         for (size_t t = 0; t < thread_count; ++t) {
             U start = t * chunk + std::min(t, remainder);
             U end = (t + 1) * chunk + std::min(t + 1, remainder);
-            pool.add_job([&image, &parents, &deja_vu, start, end] {
+            pool.add_job([t, begin, &image, &parents, &deja_vu, start, end] {
                 MaxTree::compute_chunk<T, U>(image, parents, deja_vu, start, end);
+		printf("T: %lu finished in %f\n", t, MPI_Wtime() - begin);
             });
         }
         pool.wait_all();
@@ -58,8 +61,9 @@ public:
                 auto& rules = area_rules[t];
                 auto& merge_rules = area_rules[merge_point];
 
-                pool.add_job([&image, &parents, start, &rules, &merge_rules] {
+                pool.add_job([t, s, begin, &image, &parents, start, &rules, &merge_rules] {
                     MaxTree::merge_parents(image, parents, start, rules, merge_rules);
+		    printf("T: %lu finished layer %lu in %f\n", t, s, MPI_Wtime() - begin);
                 });
             }
             pool.wait_all();
@@ -70,8 +74,9 @@ public:
             U start = t * chunk + std::min(t, remainder);
             U end = (t + 1) * chunk + std::min(t + 1, remainder);
             auto& rules = area_rules.front();
-            pool.add_job([&parents, &rules, start, end] {
+            pool.add_job([t, begin, &parents, &rules, start, end] {
                 MaxTree::apply_rules(parents, rules, start, end);
+		printf("T: %lu finished applying in %f\n", t, MPI_Wtime() - begin);
             });
         }
         pool.join_all();
