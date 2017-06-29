@@ -9,9 +9,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "barrier.h"
 #include "image.h"
 #include "rules.h"
+#include "thread_pool.h"
 
 class MaxTree {
 public:
@@ -25,17 +25,56 @@ public:
             return;
         }
 
+        // allocate resources
         thread_count = std::min(thread_count, static_cast<unsigned int>(image.height()));
-        Barrier barrier(thread_count);
-        std::vector<std::thread> threads;
         std::vector<AreaRules<U>> area_rules(thread_count);
-//        std::cout << image << std::endl;
-        for (unsigned int t = 0; t < thread_count; ++t) {
-            threads.push_back(std::thread([t, thread_count, &barrier, &image, &parents, &deja_vu, &area_rules] {
-                MaxTree::compute_threaded<T, U>(t, thread_count, barrier, image, parents, deja_vu, area_rules);
-            }));
+        ThreadPool pool(thread_count);
+
+        // partition offsets
+        U chunk = image.size() / thread_count;
+        U remainder = image.size() % thread_count;
+
+        // processing loop
+        for (size_t t = 0; t < thread_count; ++t) {
+            U start = t * chunk + std::min(t, remainder);
+            U end = (t + 1) * chunk + std::min(t + 1, remainder);
+            pool.add_job([&image, &parents, &deja_vu, start, end] {
+                MaxTree::compute_chunk<T, U>(image, parents, deja_vu, start, end);
+            });
         }
-        for (auto& thread : threads) thread.join();
+        pool.wait_all();
+
+        // merge partial results
+        size_t steps = static_cast<size_t>(std::ceil(std::log2(thread_count)));
+        for (size_t s = 0; s < steps; ++s) {
+            size_t offset = static_cast<size_t>(std::pow(2.0, s));
+            size_t skip = 2 * offset;
+
+            for (size_t t = 0; t < thread_count; t += skip) {
+                U merge_point = t + offset;
+                U start = merge_point * chunk + std::min(merge_point, remainder);
+                if (start >= image.size() or merge_point >= thread_count) continue;
+
+                auto& rules = area_rules[t];
+                auto& merge_rules = area_rules[merge_point];
+
+                pool.add_job([&image, &parents, start, &rules, &merge_rules] {
+                    MaxTree::merge_parents(image, parents, start, rules, merge_rules);
+                });
+            }
+            pool.wait_all();
+        }
+
+        // apply the rules
+        for (size_t t = 0; t < thread_count; ++t) {
+            U start = t * chunk + std::min(t, remainder);
+            U end = (t + 1) * chunk + std::min(t + 1, remainder);
+            auto& rules = area_rules.front();
+            pool.add_job([&parents, &rules, start, end] {
+                MaxTree::apply_rules(parents, rules, start, end);
+            });
+        }
+        pool.join_all();
     }
 
     // canonize a pixel according to the area remapping rules
@@ -124,46 +163,6 @@ protected:
         return neighbors;
     }
 
-    template <typename T, typename U=Parents::type>
-    static void compute_threaded(unsigned int thread, unsigned thread_count, Barrier& barrier, const Image<T>& image, Parents& parents, Image<uint8_t>& deja_vu, std::vector<AreaRules<U>>& area_rules) {
-        // set thread affinity
-        cpu_set_t cpu_set;
-        CPU_ZERO(&cpu_set); CPU_SET(thread, &cpu_set);
-        pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpu_set);
-
-        // partition offsets
-        U chunk = image.size() / thread_count;
-        U remainder = image.size() % thread_count;
-
-        // processing
-        U start = thread * chunk + std::min(static_cast<U>(thread), remainder);
-        U end = (thread + 1) * chunk + std::min(static_cast<U>(thread + 1), remainder);
-        MaxTree::compute_chunk<T, U>(image, parents, deja_vu, start, end);
-        barrier.wait();
-
-        // merge partial results
-        size_t steps = static_cast<size_t>(std::ceil(std::log2(thread_count)));
-        for (size_t s = 0; s < steps; ++s) {
-            size_t offset = 1 << s;
-            size_t skip = 2 * offset;
-
-            if (offset <= thread and (thread - offset) % skip == 0) {
-                U rules_offset = std::max(1ul, offset / 2);
-                std::swap(area_rules[thread], area_rules[thread - rules_offset]);
-                auto& rules = area_rules[thread];
-                auto& merge_rules = s > 0 ? area_rules[std::min<size_t>(thread + rules_offset, thread_count - 1)] : rules;
-                MaxTree::merge_parents(image, parents, start, rules, merge_rules);
-            }
-            barrier.wait();
-        }
-
-        // apply the rules
-        size_t access_point = 1 << (steps - 1);
-        auto& rules = area_rules[access_point];
-        MaxTree::apply_rules(parents, rules, start, end);
-        barrier.wait();
-    }
-
     // compute ax tree on a chunk of the image, implements salembier's algorithm
     template <typename T, typename U=Parents::type>
     static void compute_chunk(const Image<T>& image, Parents& parents, Image<uint8_t>& deja_vu, U start, U end) {
@@ -247,12 +246,11 @@ protected:
             U left = MaxTree::canonize(area, rule.first);
             U right = MaxTree::canonize(merge_rules, rule.first);
             auto minmax = std::minmax(left, right);
-            if (minmax.first == minmax.second) continue;
 
             area[rule.first] = minmax.first;
             area[minmax.second] = minmax.first;
         }
-        if (area != merge_rules) merge_rules.clear();
+        merge_rules.clear();
 
         // detect new rules
         for (size_t i = start - image.width(), j = start; i < start; ++i, ++j) {

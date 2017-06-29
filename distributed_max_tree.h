@@ -48,7 +48,7 @@ public:
         offset = this->rank_ == 0 ? 0 : offset;
 
         // local max tree computation
-        MaxTree::compute(image, parents, 2);//this->thread_count_);
+        MaxTree::compute(image, parents, this->thread_count_);
         // distributed resolution
         TupleBuckets<T, U> root_buckets = this->get_halo_roots(image, parents, offset);
         TupleBuckets<T, U> area_buckets = this->connect_halos(image, parents, offset, area);
