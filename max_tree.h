@@ -268,7 +268,7 @@ protected:
         if (image[y] > image[x] or (image[y] == image[x] and y > x)) std::swap(x, y);
         while (x != y and y != Parents::infinity) {
             U z = parents[x] == x ? Parents::infinity : parents[x];
-            if (image[z] >= image[y] and z != Parents::infinity) {
+            if (z != Parents::infinity and image[z] >= image[y]) {
                 x = z;
             } else if (image[x] == image[y]) {
                 U x_canonized = MaxTree::canonize(area, x);
@@ -292,7 +292,8 @@ protected:
     static U closer(U x, U y, const Image<T>& image, Parents& parents) {
         U x_parent = parents[x];
         U y_parent = parents[y];
-        if (x == x_parent or y == y_parent) return Parents::infinity;
+        if (x == x_parent) { if (y == y_parent) return Parents::infinity; else return y_parent; }
+        if (y == y_parent) return Parents::infinity;
         if (image[x_parent] > image[y_parent]) return x_parent;
         if (image[y_parent] > image[x_parent]) return y_parent;
         return std::max(x_parent, y_parent);
