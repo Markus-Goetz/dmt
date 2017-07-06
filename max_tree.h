@@ -190,8 +190,13 @@ protected:
                 is_processed = 1;
 
                 // add neighbors to queue
-                pixels[neighbor.color].push_back(neighbor.position);
                 stacks[neighbor.color].push_back(neighbor.position);
+                auto& pixel_bucket = pixels[neighbor.color];
+                pixel_bucket.push_back(neighbor.position);
+                if (pixel_bucket.front() > pixel_bucket.back()) {
+                    std::swap(pixel_bucket.front(), pixel_bucket.back());
+                }
+
 
                 // neighbor color is larger, descend first in depth-first-fashion
                 if (color < neighbor.color) {
@@ -202,10 +207,8 @@ protected:
 
             // the stack is empty, the current flat zone is found
             if (bucket.empty()) {
-                auto& pixel_bucket = pixels[color];
-
                 // determine canonical point
-                std::sort(pixel_bucket.begin(), pixel_bucket.end());
+                auto& pixel_bucket = pixels[color];
                 const U canonical = pixel_bucket.front();
 
                 // canonize flooded area
