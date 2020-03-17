@@ -2,7 +2,7 @@
 
 Computes the [max-tree](https://scikit-image.org/docs/dev/auto_examples/developers/plot_max_tree.html) of an image - a hierarchical representation of that image that is the basis for a large family of morphological filters. It is often used as the basis of feature engineering in remote sensing applications.
 
-dmt is written in C++ and may be used as shared library and command line tool.  
+dmt is written in C++ and may be used as a command line tool. Data is passed to and generaed by the tool in form of HDF5 files.
 
 ## Dependencies
 
@@ -30,7 +30,7 @@ dmt's command line usage flags are shown below. You may obtain the same message 
 
 ```
 dmt - distributed max-tree
-Usage:
+Usage: ./dmt <IN_FILE> <IN_DATASET> <OUT_FILE> <OUT_DATASET>
 ```
 
 The typical basic usage of dmt is shown below. The line shows a typical high-performance computing setup with multiple distributed nodes and processing cores per node, but also runs on your work stations or laptop. The data is passed to the application in form of an HDF5 file. 
@@ -69,4 +69,3 @@ BibTex
 If you want to let us know about feature requests, bugs or issues you are kindly referred to the [issue tracker](https://github.com/Markus-Goetz/dmt/issues).
 
 For any other discussion, please write an [e-mail](mailto:markus.goetz@kit.edu).
-
