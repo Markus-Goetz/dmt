@@ -1,22 +1,30 @@
-cmake_minimum_required(VERSION 3.3)
-project(dmt)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.10 FATAL_ERROR)
+PROJECT(dmt)
 
-find_package(MPI REQUIRED)
-find_package(HDF5 REQUIRED)
-find_package(Threads REQUIRED)
-
-#set(CMAKE_CXX_COMPILER "scalasca")
-#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -instrument ${MPI_CXX_COMPILER}")
-
-set(CMAKE_CXX_COMPILER ${MPI_CXX_COMPILER})
+# set c++ properties
+ENABLE_LANGUAGE(CXX)
 set(CMAKE_BUILD_TYPE RELEASE)
-set(CMAKE_CXX_STANDARD 14)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -pedantic")
+SET(CMAKE_CXX_STANDARD 14)
+SET(CMAKE_CXX_FLAGS "-Ofast -Wall -Wextra -pedantic")
 
-include_directories(.)
-include_directories(${HDF5_INCLUDE_DIRS})
-include_directories(${MPI_CXX_INCLUDE_PATH})
-set(SOURCE_FILES
+# add the include and source directories
+INCLUDE_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+# detect mpi
+FIND_PACKAGE(MPI REQUIRED)
+SET(CMAKE_CXX_COMPILER ${MPI_CXX_COMPILER})
+INCLUDE_DIRECTORIES(${MPI_CXX_INCLUDE_PATH})
+
+# detect hdf5
+FIND_PACKAGE(HDF5 REQUIRED)
+INCLUDE_DIRECTORIES("${HDF5_INCLUDE_DIRS}")
+LINK_DIRECTORIES(${HDF5_LIBRARY_DIRS})
+
+# detect C++14 threads
+FIND_PACKAGE(Threads REQUIRED)
+
+# define the source files
+SET(SOURCE_FILES
     distributed_max_tree.h
     endpoints.h
     image.h
@@ -26,12 +34,13 @@ set(SOURCE_FILES
     hdf5_wrapper.h
     util.h
 )
-link_directories(${HDF5_LIBRARY_DIRS})
 
-add_executable(dmt ${SOURCE_FILES})
-target_link_libraries(dmt ${HDF5_LIBRARIES})
-target_link_libraries(dmt Threads::Threads)
+# main executable definition
+ADD_EXECUTABLE(dmt src/main.cpp)
+TARGET_LINK_LIBRARIES(dmt ${HDF5_LIBRARIES})
+TARGET_LINK_LIBRARIES(dmt Threads::Threads)
 
-add_executable(tester tester.cpp)
-target_link_libraries(tester ${HDF5_LIBRARIES})
-target_link_libraries(dmt Threads::Threads)
+# test suite executable
+ADD_EXECUTABLE(tester src/tester.cpp)
+TARGET_LINK_LIBRARIES(tester ${HDF5_LIBRARIES})
+TARGET_LINK_LIBRARIES(tester Threads::Threads)
